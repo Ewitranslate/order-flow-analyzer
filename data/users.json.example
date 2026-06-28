@@ -1,0 +1,11 @@
+{
+  "users": {
+    "demo": {
+      "password_hash": "замените через: python src/auth_manage.py add demo YOUR_PASSWORD --email you@example.com",
+      "active": true,
+      "email": "you@example.com",
+      "email_verified": true,
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  }
+}
