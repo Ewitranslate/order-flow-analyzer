@@ -61,6 +61,17 @@ data/                    — users.json, кэш (не коммитится)
 .streamlit/secrets.toml  — секреты (не коммитится)
 ```
 
+## Деплой (Render)
+
+1. [render.com](https://render.com) → **New Web Service** → репозиторий `Ewitranslate/order-flow-analyzer`
+2. **Start Command:** `bash scripts/render_start.sh` (или используйте `render.yaml` через Blueprint)
+3. **Health Check Path:** `/_stcore/health`
+4. **Environment:** `AUTH_SECRET_KEY`, `AUTH_ENABLED=true`, `AUTH_ALLOW_REGISTRATION=true`
+5. **Persistent Disk** → mount `data` (1 GB) — иначе пользователи пропадут после редеплоя
+6. После деплоя: жёсткое обновление страницы (Ctrl+Shift+R)
+
+> Если видите сырой HTML/CSS и ошибки `Failed to fetch .../static/js/...` — обновите Start Command и `.streamlit/config.toml` из репозитория, затем **Clear build cache & deploy**.
+
 ## Деплой (Streamlit Community Cloud)
 
 1. Запушьте репозиторий на **публичный** GitHub

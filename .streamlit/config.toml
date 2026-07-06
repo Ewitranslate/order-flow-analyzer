@@ -1,0 +1,17 @@
+# Настройки для деплоя (Render, Streamlit Cloud и др. reverse-proxy).
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+fileWatcherType = "none"
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false
+serverAddress = "0.0.0.0"
+
+[client]
+toolbarMode = "minimal"
+
+[runner]
+fastReruns = true

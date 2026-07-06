@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: order-flow-analyzer
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/render_start.sh
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: AUTH_ENABLED
+        value: "true"
+      - key: AUTH_ALLOW_REGISTRATION
+        value: "true"
+      - key: AUTH_USERS_FILE
+        value: data/users.json
+      - key: AUTH_DB_FILE
+        value: data/auth.sqlite3
+      - key: AUTH_SECRET_KEY
+        generateValue: true
+    disk:
+      name: order-flow-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
