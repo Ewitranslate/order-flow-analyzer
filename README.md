@@ -1,44 +1,85 @@
-# Order Flow Analyzer + Divergence Engine (Binance)
+# Order Flow Analyzer
 
-MVP (Этапы 1–7): WebSocket trades → delta/cum-delta → CSV → Plotly chart.
+Веб-приложение на **Streamlit** для анализа крипторынка Binance: order flow (δ / cum-delta), Williams %R сканер, Price Compression, ATR, дивергенции, Open Interest.
 
-## Setup
+## Возможности
+
+- **Главный график** — свечи, объём, VWAP, кумулятивная δ, OI (futures), Williams %R, ATR, дивергенции цена ↔ δ, зоны **Price Compression**
+- **Cripto Scanner** — массовый поиск по USDT spot (Williams, SMA, сжатие цены, Δкум/OI/ATR 24ч, дивергенции)
+- **Авторизация** — регистрация, сессии, активные устройства (см. `docs/SESSION_AUTH.md`)
+
+## Быстрый старт
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/YOUR_USERNAME/order-flow-analyzer.git
+cd order-flow-analyzer
+
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Доступ (только зарегистрированные пользователи)
-
-1. Скопируйте пример секретов:
-   ```bash
-   mkdir -p .streamlit
-   cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-   ```
-2. В `secrets.toml` задайте `auth.secret_key`.
-3. Создать пользователя вручную (для админа):
-   ```bash
-   python src/auth_manage.py add myuser 'надёжный-пароль'
-   ```
-4. Запустите приложение — **главная** с входом и **регистрацией** (логин + пароль, без email).
-
-Опционально: `require_email_verification = true` и блок `[auth.smtp]` — если нужно подтверждение по почте.
-
-`auth.enabled = false` — только для локальной разработки без входа.
-
-## Run streamer (writes CSV)
+### Секреты (обязательно перед запуском)
 
 ```bash
-python -m src.main
+mkdir -p .streamlit data
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+cp data/users.json.example data/users.json
 ```
 
-## Plot from CSV
+Отредактируйте `.streamlit/secrets.toml`:
+
+- `auth.secret_key` — случайная строка 32+ символов
+- при необходимости `telegram.bot_token` / `chat_id` для уведомлений сканера
+
+Создайте первого пользователя:
 
 ```bash
-python -m src.visualization.plot --symbol btcusdt
+python src/auth_manage.py add admin 'ваш-надёжный-пароль' --email you@example.com
 ```
 
-CSV files appear in `./data/` (project root).
+Для локальной разработки без входа: `auth.enabled = false` в `secrets.toml`.
 
+### Запуск
+
+```bash
+streamlit run src/app.py
+```
+
+Откройте в браузере: http://localhost:8501
+
+## Структура проекта
+
+```
+src/
+  app.py                 — главное приложение Streamlit
+  pages/                 — Cripto Scanner, Account, Admin, …
+  price_compression.py   — алгоритм сжатия цены (Pivot + регрессия)
+  williams_scanner.py    — сканер Binance spot
+  auth*.py               — авторизация и сессии
+data/                    — users.json, кэш (не коммитится)
+.streamlit/secrets.toml  — секреты (не коммитится)
+```
+
+## Деплой (Streamlit Community Cloud)
+
+1. Запушьте репозиторий на **публичный** GitHub
+2. [share.streamlit.io](https://share.streamlit.io) → **New app**
+3. **Main file path:** `src/app.py`
+4. В **Secrets** вставьте содержимое `secrets.toml`
+5. Deploy
+
+> Для продакшена используйте сильный `secret_key`, HTTPS и `auth.enabled = true`.
+
+## Что не попадает в git
+
+| Файл | Причина |
+|------|---------|
+| `.streamlit/secrets.toml` | ключи, токены |
+| `data/users.json` | пароли (хэши) |
+| `data/auth.sqlite3` | сессии |
+| `data/*.csv`, `data/cache/` | локальные данные |
+
+## Лицензия
+
+MIT — см. `LICENSE` (при необходимости добавьте файл).

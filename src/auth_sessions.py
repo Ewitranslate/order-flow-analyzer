@@ -200,11 +200,12 @@ def session_error_message(session: dict[str, Any]) -> str:
 def validate_access_token(token: str) -> tuple[dict[str, Any] | None, str | None]:
     """
     Проверяет JWT и активную сессию в БД.
-    Возвращает (payload, error_message).
+    Возвращает (payload, fatal_error).
+    payload is None и fatal_error is None — access устарел, нужен refresh (не выход).
     """
     payload = decode_access_token(token)
     if not payload:
-        return None, SESSION_REVOKED_MESSAGE
+        return None, None
 
     session = get_session(payload["session_id"])
     if not session:
@@ -212,7 +213,7 @@ def validate_access_token(token: str) -> tuple[dict[str, Any] | None, str | None
     if str(session.get("status") or "") != "active":
         return None, session_error_message(session)
     if str(session.get("access_jti") or "") != payload["jti"]:
-        return None, SESSION_REVOKED_MESSAGE
+        return None, None
     if str(session.get("username") or "") != payload["username"]:
         return None, SESSION_REVOKED_MESSAGE
 
@@ -223,14 +224,21 @@ def validate_access_token(token: str) -> tuple[dict[str, Any] | None, str | None
 def touch_session(session_id: str) -> None:
     init_auth_db()
     now = _now_iso()
-    with db_conn() as conn:
-        conn.execute(
-            "UPDATE user_sessions SET last_active_at = ? WHERE session_id = ? AND status = 'active'",
-            (now, session_id),
-        )
+    try:
+        with db_conn() as conn:
+            conn.execute(
+                "UPDATE user_sessions SET last_active_at = ? WHERE session_id = ? AND status = 'active'",
+                (now, session_id),
+            )
+    except Exception:
+        pass
 
 
 def refresh_user_session(refresh_token: str, session_id: str) -> dict[str, str] | None:
+    """
+    Продлевает access JWT. Refresh-токен не ротируем — иначе при быстрых rerun
+    Streamlit второй запрос получает 401 и выкидывает на вход.
+    """
     init_auth_db()
     token_hash = hash_token(refresh_token)
     sid = session_id.strip()
@@ -246,18 +254,16 @@ def refresh_user_session(refresh_token: str, session_id: str) -> dict[str, str] 
             return None
 
         username = str(row["username"])
-        new_refresh = new_refresh_token()
-        new_hash = hash_token(new_refresh)
         new_jti_val = new_jti()
         now = _now_iso()
 
         conn.execute(
             """
             UPDATE user_sessions
-            SET refresh_token_hash = ?, access_jti = ?, last_active_at = ?
+            SET access_jti = ?, last_active_at = ?
             WHERE session_id = ?
             """,
-            (new_hash, new_jti_val, now, sid),
+            (new_jti_val, now, sid),
         )
 
     access = create_access_token(
@@ -267,7 +273,7 @@ def refresh_user_session(refresh_token: str, session_id: str) -> dict[str, str] 
     )
     return {
         "access_token": access,
-        "refresh_token": new_refresh,
+        "refresh_token": refresh_token,
         "session_id": sid,
         "username": username,
     }

@@ -586,6 +586,14 @@ def render_auth_gate() -> str | None:
 
     if application_entered():
         if not user and not is_guest_session():
+            # Не сбрасывать вход при кратковременном сбое проверки токена в том же сеансе
+            sid = st.session_state.get("auth_session_id")
+            if isinstance(sid, str) and sid:
+                from auth_guard import trust_active_db_session
+
+                recovered = trust_active_db_session(sid)
+                if recovered:
+                    return recovered
             leave_application()
         else:
             return user

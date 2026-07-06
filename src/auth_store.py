@@ -12,7 +12,7 @@ from typing import Any, Iterator
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB = _PROJECT_ROOT / "data" / "auth.sqlite3"
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -37,8 +37,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     country TEXT,
     city TEXT,
     user_agent TEXT,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    device_id TEXT
+    is_active INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_user_sessions_username ON user_sessions(username);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_refresh ON user_sessions(refresh_token_hash);
@@ -141,6 +140,53 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE IF EXISTS user_devices")
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """Убирает legacy-колонку device_id (NOT NULL в старой схеме v1)."""
+    cols = _table_columns(conn, "user_sessions")
+    if "device_id" not in cols:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE user_sessions_v3 (
+            session_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            refresh_token_hash TEXT NOT NULL,
+            access_jti TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            last_active_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            ip_address TEXT,
+            browser TEXT,
+            os_name TEXT,
+            device_name TEXT,
+            country TEXT,
+            city TEXT,
+            user_agent TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO user_sessions_v3 (
+            session_id, username, refresh_token_hash, access_jti,
+            status, created_at, last_active_at, revoked_at, revoked_reason,
+            ip_address, browser, os_name, device_name, country, city, user_agent, is_active
+        )
+        SELECT
+            session_id, username, refresh_token_hash, access_jti,
+            CASE
+                WHEN status IS NOT NULL AND status != '' THEN status
+                WHEN is_active = 1 THEN 'active'
+                ELSE 'revoked'
+            END,
+            created_at, last_active_at, revoked_at, revoked_reason,
+            ip_address, browser, os_name, device_name, country, city, user_agent, is_active
+        FROM user_sessions;
+        DROP TABLE user_sessions;
+        ALTER TABLE user_sessions_v3 RENAME TO user_sessions;
+        """
+    )
+
+
 def init_auth_db() -> None:
     global _initialized
     with _lock:
@@ -152,6 +198,8 @@ def init_auth_db() -> None:
             current = int(row["v"] or 0) if row else 0
             if current < 2:
                 _migrate_to_v2(conn)
+            if current < 3:
+                _migrate_to_v3(conn)
             if current < _SCHEMA_VERSION:
                 from datetime import datetime, timezone
 

@@ -40,10 +40,27 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from auth import render_auth_gate, render_auth_sidebar, require_page_access, PAGE_MAIN
-from main_settings_presets import render_main_presets_sidebar
+from main_settings_presets import apply_pending_preset_before_widgets, render_main_presets_sidebar
 from futures_market import fetch_futures_klines
+from atr_indicator import add_atr_panel
+from price_compression import (
+    CompressionParams,
+    CompressionZone,
+    RECOMMENDED_COMPRESSION_HELP_RU,
+    add_compression_traces,
+    apply_recommended_compression_session_state,
+    compression_params_from_session,
+    default_compression_params_for_tf,
+    detect_compression_zones,
+    init_compression_session_state,
+)
 from williams_r import add_williams_panel
-from oi_symbol_cache import list_symbols_with_open_interest_fast, oi_cache_age_sec, clear_oi_symbol_cache
+from oi_symbol_cache import (
+    list_symbols_with_open_interest_fast,
+    load_oi_symbol_cache_stale,
+    oi_cache_age_sec,
+    clear_oi_symbol_cache,
+)
 
 KLINES_API: dict[str, str] = {
     "5m": "5m",
@@ -67,11 +84,12 @@ TF_TITLES_RU: dict[str, str] = {
 CHART_HEIGHT_PX: int = 700
 
 # Индикаторные панели под OHLC: пользователь может менять порядок (см. сайдбар).
-DEFAULT_PANEL_ORDER: list[str] = ["volume", "cum_delta", "open_interest", "williams"]
+DEFAULT_PANEL_ORDER: list[str] = ["volume", "cum_delta", "open_interest", "atr", "williams"]
 PANEL_LABELS_RU: dict[str, str] = {
     "volume": "Объём",
     "cum_delta": "Кумулятивная δ",
     "open_interest": "Open Interest",
+    "atr": "ATR",
     "williams": "Williams %R",
 }
 
@@ -161,10 +179,14 @@ def cached_spot_usdt_symbol_list(reload_token: int = 0) -> list[str]:
 @st.cache_data(ttl=6 * 3600, show_spinner="Список пар с OI…")
 def cached_usdtm_symbols_with_oi(period: str, rebuild_token: int = 0) -> tuple[str, ...]:
     """USDT-M perpetual с OI: файл на диске + быстрая пересборка (топ по объёму)."""
-    syms, _src = list_symbols_with_open_interest_fast(
-        period, rebuild=bool(rebuild_token), max_workers=14
-    )
-    return tuple(syms)
+    try:
+        syms, _src = list_symbols_with_open_interest_fast(
+            period, rebuild=bool(rebuild_token), max_workers=14
+        )
+        return tuple(syms)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        stale = load_oi_symbol_cache_stale(period)
+        return tuple(stale) if stale else tuple()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -394,15 +416,19 @@ def _init_main_sidebar_defaults() -> None:
         "cb_show_willy": False,
         "sl_willy_length": 21,
         "sl_willy_ema_length": 13,
+        "cb_show_atr": False,
+        "sl_atr_period": 14,
         "cb_div_enabled": False,
         "cb_div_show_lines": True,
         "sl_div_pivot_left": 5,
         "sl_div_pivot_right": 5,
         "sl_div_min_bars": 10,
+        "cb_show_compression": False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+    init_compression_session_state(st.session_state, "sl_pc", only_missing=True)
 
 
 # ── Дивергенции: цена (фрактальные экстремумы) vs кумулятивная δ ───────────────
@@ -765,6 +791,13 @@ def build_figure_bars(
     show_willy: bool = False,
     willy_length: int = 21,
     willy_ema_length: int = 13,
+    show_atr: bool = False,
+    atr_period: int = 14,
+    show_compression: bool = False,
+    compression_zones: list[CompressionZone] | None = None,
+    compression_pivot_left: int = 5,
+    compression_pivot_right: int = 5,
+    compression_min_pivots: int = 3,
     panel_order: list[str] | None = None,
 ) -> go.Figure:
     pch = chart_pair.upper()
@@ -784,11 +817,13 @@ def build_figure_bars(
     show_oi = bool(show_futures_oi)
     show_vol = bool(show_volume)
     show_w = bool(show_willy)
+    show_a = bool(show_atr)
 
     enabled_map = {
         "volume": show_vol,
         "cum_delta": True,
         "open_interest": show_oi,
+        "atr": show_a,
         "williams": show_w,
     }
     order = list(panel_order) if panel_order else list(DEFAULT_PANEL_ORDER)
@@ -808,6 +843,8 @@ def build_figure_bars(
             return (
                 f"Williams %R ({int(willy_length)}) + EMA {int(willy_ema_length)} · {pch}"
             )
+        if key == "atr":
+            return f"ATR ({int(atr_period)}) · {pch} ({lbl})"
         return key
 
     layout_titles: list[str] = [f"{pch} · OHLC ({lbl})"]
@@ -819,6 +856,7 @@ def build_figure_bars(
     vol_row = row_map.get("volume")
     cum_delta_row = row_map.get("cum_delta", 2)
     oi_row = row_map.get("open_interest")
+    atr_row = row_map.get("atr")
     willy_row = row_map.get("williams")
 
     weights = {
@@ -826,6 +864,7 @@ def build_figure_bars(
         "volume": 0.16,
         "cum_delta": 0.32,
         "open_interest": 0.22,
+        "atr": 0.20,
         "williams": 0.22,
     }
     selected = ["price"] + active
@@ -889,6 +928,20 @@ def build_figure_bars(
             ),
             row=1,
             col=1,
+        )
+    if show_compression and compression_zones:
+        hi = pd.to_numeric(dfp["high"], errors="coerce").to_numpy(dtype=np.float64)
+        lo = pd.to_numeric(dfp["low"], errors="coerce").to_numpy(dtype=np.float64)
+        add_compression_traces(
+            fig,
+            dfp,
+            compression_zones,
+            row=1,
+            high=hi,
+            low=lo,
+            pivot_left=int(compression_pivot_left),
+            pivot_right=int(compression_pivot_right),
+            min_pivots=int(compression_min_pivots),
         )
     # Candlestick почти не отдаёт hit-test для вертикали x unified; невидимые точки по центру свечи.
     nb = len(dfp)
@@ -996,6 +1049,13 @@ def build_figure_bars(
             ),
             row=oi_row,
             col=1,
+        )
+    if show_a and atr_row is not None:
+        add_atr_panel(
+            fig,
+            dfp,
+            row=atr_row,
+            period=int(atr_period),
         )
     if show_w and willy_row is not None:
         add_williams_panel(
@@ -1246,6 +1306,10 @@ def render_dashboard(
     show_willy: bool = False,
     willy_length: int = 21,
     willy_ema_length: int = 13,
+    show_atr: bool = False,
+    atr_period: int = 14,
+    show_compression: bool = False,
+    compression_params: CompressionParams | None = None,
     panel_order: list[str] | None = None,
 ) -> None:
     ch_sym = _norm_sym(chart_pair)
@@ -1358,6 +1422,10 @@ def render_dashboard(
 
                 div_short_bars = True
 
+        compression_zones: list[CompressionZone] = []
+        if show_compression and compression_params is not None:
+            compression_zones = detect_compression_zones(blended, compression_params, use_closed_bar=True)
+
         fig = build_figure_bars(
             blended,
             chart_pair=chart_pair,
@@ -1373,6 +1441,13 @@ def render_dashboard(
             show_willy=show_willy,
             willy_length=willy_length,
             willy_ema_length=willy_ema_length,
+            show_atr=show_atr,
+            atr_period=int(atr_period),
+            show_compression=show_compression,
+            compression_zones=compression_zones if show_compression else None,
+            compression_pivot_left=int(compression_params.pivot_left) if compression_params else 5,
+            compression_pivot_right=int(compression_params.pivot_right) if compression_params else 5,
+            compression_min_pivots=int(compression_params.min_pivots) if compression_params else 3,
             panel_order=panel_order,
         )
         cap = (
@@ -1408,6 +1483,19 @@ def render_dashboard(
 
                 cap += " Дивергенции: по текущим параметрам сигналов нет."
 
+        if show_compression:
+            if compression_zones:
+                last_z = compression_zones[-1]
+                cap += (
+                    f" **Price Compression:** зон **{len(compression_zones)}**; "
+                    f"последняя Score **{last_z.score:.0f}**, ratio **{last_z.compression_ratio:.2f}**, "
+                    f"↑{last_z.upper_price:.4g} ↓{last_z.lower_price:.4g}, "
+                    f"формирование **{last_z.formation_bars}** бар., "
+                    f"касания ↑{last_z.upper_touches} ↓{last_z.lower_touches}."
+                )
+            else:
+                cap += " **Price Compression:** по текущим параметрам зон сжатия нет."
+
         st.caption(cap)
 
     st.plotly_chart(fig, use_container_width=True)
@@ -1438,6 +1526,7 @@ def main() -> None:
     with st.sidebar:
         render_auth_sidebar(auth_user)
         _init_main_sidebar_defaults()
+        apply_pending_preset_before_widgets()
         st.markdown("**Binance Spot · USDT**")
         st.caption("**Пары и таймфрейм** — инструменты; **Индикаторы** — что показать на графике (вкл./выкл.).")
 
@@ -1675,6 +1764,20 @@ def main() -> None:
             )
 
             st.markdown("---")
+            st.markdown("**ATR (Average True Range)**")
+            show_atr = st.checkbox(
+                "ATR (нижняя панель)",
+                key="cb_show_atr",
+                help="Средний истинный диапазон (Wilder RMA). Показывает волатильность в единицах цены.",
+            )
+            atr_period = st.slider(
+                "ATR · период",
+                min_value=2,
+                max_value=100,
+                key="sl_atr_period",
+            )
+
+            st.markdown("---")
             st.markdown("**Williams %R + EMA**")
             show_willy = st.checkbox(
                 "Williams %R с EMA (нижняя панель)",
@@ -1710,6 +1813,101 @@ def main() -> None:
             div_pivot_right = st.slider("Сила pivot · справа (баров)", 2, 12, key="sl_div_pivot_right")
             div_min_bars = st.slider("Мин. расстояние между соседними свингами", 5, 80, key="sl_div_min_bars")
 
+            st.markdown("---")
+            st.markdown("**Price Compression** · сужение перед импульсом")
+            show_compression = st.checkbox(
+                "Показать зоны сжатия (Pivot + регрессия)",
+                key="cb_show_compression",
+                help="Подтверждённые Pivot High/Low, границы по МНК, без ATR/Bollinger. "
+                "Рекомендуемые pivot: 15m → 3/3, 1h → 5/5.",
+            )
+            pc_tf_hint = default_compression_params_for_tf(tf_key)
+            if st.button("Pivot по таймфрейму", key="btn_pc_tf_pivot", use_container_width=True):
+                st.session_state["sl_pc_pivot_left"] = pc_tf_hint.pivot_left
+                st.session_state["sl_pc_pivot_right"] = pc_tf_hint.pivot_right
+                st.rerun()
+            st.caption(
+                f"Для **{TF_TITLES_RU.get(tf_key, tf_key)}**: Pivot L/R = "
+                f"**{pc_tf_hint.pivot_left}** / **{pc_tf_hint.pivot_right}**"
+            )
+            with st.expander("Параметры Price Compression", expanded=bool(show_compression)):
+                if st.button(
+                    "Рекомендуемые параметры",
+                    key="btn_pc_recommended",
+                    use_container_width=True,
+                    help="Сброс к рекомендуемым: pivot 3, касания 3, ratio 0.65, slope 0.08, окно 120, Score 75.",
+                ):
+                    apply_recommended_compression_session_state(
+                        st.session_state,
+                        "sl_pc",
+                        pivot_left=pc_tf_hint.pivot_left,
+                        pivot_right=pc_tf_hint.pivot_right,
+                    )
+                    st.rerun()
+                st.slider("Pivot Left", 2, 12, key="sl_pc_pivot_left")
+                st.slider("Pivot Right", 2, 12, key="sl_pc_pivot_right")
+                st.slider(
+                    "Мин. Pivot на границу",
+                    2,
+                    8,
+                    key="sl_pc_min_pivots",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_pivots"],
+                )
+                st.slider(
+                    "Мин. касаний (верх и низ)",
+                    2,
+                    8,
+                    key="sl_pc_min_touches",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_touches"],
+                )
+                st.slider(
+                    "Период сравнения ширины (баров)",
+                    8,
+                    60,
+                    key="sl_pc_lookback",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["lookback_bars"],
+                )
+                st.slider(
+                    "Макс. коэффициент сжатия (Current/Previous)",
+                    min_value=0.40,
+                    max_value=0.95,
+                    step=0.01,
+                    key="sl_pc_max_ratio",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["max_compression_ratio"],
+                )
+                st.slider(
+                    "Макс. наклон середины (%/бар)",
+                    min_value=0.06,
+                    max_value=0.15,
+                    step=0.01,
+                    key="sl_pc_max_slope",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["max_mid_slope_pct_per_bar"],
+                )
+                st.slider(
+                    "Допуск касания (% ширины)",
+                    min_value=0.04,
+                    max_value=0.25,
+                    step=0.01,
+                    key="sl_pc_touch_tol",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["touch_tolerance"],
+                )
+                st.slider(
+                    "Окно анализа (баров)",
+                    60,
+                    300,
+                    key="sl_pc_analysis",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["analysis_bars"],
+                )
+                st.slider(
+                    "Мин. Compression Score",
+                    30,
+                    90,
+                    key="sl_pc_min_score",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_score"],
+                )
+
+            compression_params = compression_params_from_session(st.session_state, "sl_pc")
+
         render_main_presets_sidebar(auth_user)
     frag = getattr(st, "fragment", None)
     if frag is not None:
@@ -1732,6 +1930,10 @@ def main() -> None:
                 show_willy=show_willy,
                 willy_length=int(willy_length),
                 willy_ema_length=int(willy_ema_length),
+                show_atr=show_atr,
+                atr_period=int(atr_period),
+                show_compression=show_compression,
+                compression_params=compression_params,
                 panel_order=list(st.session_state.get("panel_order", DEFAULT_PANEL_ORDER)),
             )
 
@@ -1755,6 +1957,10 @@ def main() -> None:
             show_willy=show_willy,
             willy_length=int(willy_length),
             willy_ema_length=int(willy_ema_length),
+            show_atr=show_atr,
+            atr_period=int(atr_period),
+            show_compression=show_compression,
+            compression_params=compression_params,
             panel_order=list(st.session_state.get("panel_order", DEFAULT_PANEL_ORDER)),
         )
 

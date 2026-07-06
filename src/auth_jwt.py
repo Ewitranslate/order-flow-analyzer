@@ -31,13 +31,13 @@ def access_token_ttl_sec() -> int:
     try:
         import streamlit as st
 
-        raw = st.secrets.get("auth", {}).get("access_token_ttl_min", 15)
+        raw = st.secrets.get("auth", {}).get("access_token_ttl_min", 60)
     except Exception:
-        raw = os.environ.get("AUTH_ACCESS_TOKEN_TTL_MIN", "15")
+        raw = os.environ.get("AUTH_ACCESS_TOKEN_TTL_MIN", "60")
     try:
         return max(1, int(raw)) * 60
     except (TypeError, ValueError):
-        return 15 * 60
+        return 60 * 60
 
 
 def refresh_token_ttl_sec() -> int:

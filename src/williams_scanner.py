@@ -22,6 +22,9 @@ import numpy as np
 import pandas as pd
 
 from app import PriceCumDeltaDivergence, detect_price_vs_cum_divergences, fetch_futures_open_interest_hist
+from atr_indicator import average_true_range
+from compression_types import recommended_compression_params
+from price_compression import CompressionParams, compression_zone_for_scanner, default_compression_params_for_tf
 from williams_r import williams_percent_r
 
 WilliamsZone = Literal["overbought", "oversold"]
@@ -102,8 +105,20 @@ OVERSOLD_LEVEL = -80.0
 DivKind = Literal["bearish", "bullish"]
 
 MAFilterMode = Literal["none", "above", "below"]
-CumDelta24hFilterMode = Literal["none", "up", "down"]
-Oi24hFilterMode = Literal["none", "up", "down"]
+CumDelta24hFilterMode = Literal["none", "up", "down", "top"]
+Oi24hFilterMode = Literal["none", "up", "down", "top"]
+Atr24hFilterMode = Literal["none", "up", "down", "top"]
+CompressionFilterMode = Literal["active", "top"]
+ScannerSortMode = Literal[
+    "bar_time",
+    "cum_delta_desc",
+    "oi_desc",
+    "atr_desc",
+    "cum_delta_abs",
+    "oi_abs",
+    "atr_abs",
+    "compression_score_desc",
+]
 
 CUM_DELTA_24H_INTERVAL = "15m"
 CUM_DELTA_24H_KLINES_LIMIT = 100  # ~25 ч на 15m
@@ -111,16 +126,40 @@ CUM_DELTA_24H_KLINES_LIMIT = 100  # ~25 ч на 15m
 OI_24H_INTERVAL = "15m"
 OI_24H_LIMIT = 100
 
+ATR_24H_INTERVAL = "15m"
+ATR_24H_KLINES_LIMIT = 100
+ATR_24H_PERIOD_DEFAULT = 14
+
 CUM_DELTA_24H_LABEL_RU: dict[CumDelta24hFilterMode, str] = {
     "none": "Не фильтровать",
     "up": "Рост кум. δ",
     "down": "Падение кум. δ",
+    "top": "Наибольшее изменение",
 }
 
 OI_24H_LABEL_RU: dict[Oi24hFilterMode, str] = {
     "none": "Не фильтровать",
     "up": "Рост OI",
     "down": "Падение OI",
+    "top": "Наибольшее изменение",
+}
+
+ATR_24H_LABEL_RU: dict[Atr24hFilterMode, str] = {
+    "none": "Не фильтровать",
+    "up": "Рост ATR",
+    "down": "Падение ATR",
+    "top": "Наибольшее изменение",
+}
+
+SCANNER_SORT_LABELS_RU: dict[ScannerSortMode, str] = {
+    "bar_time": "Время бара",
+    "cum_delta_desc": "Δкум 24ч (убыв.)",
+    "oi_desc": "ΔOI 24ч (убыв.)",
+    "atr_desc": "ΔATR 24ч (убыв.)",
+    "cum_delta_abs": "Наибольший |Δкум|",
+    "oi_abs": "Наибольший |ΔOI|",
+    "atr_abs": "Наибольший |ΔATR|",
+    "compression_score_desc": "Compression Score (убыв.)",
 }
 
 DIV_LABEL_RU: dict[DivKind, str] = {
@@ -141,9 +180,25 @@ class ScannerSearchCriteria:
     cum_delta_24h_filter: CumDelta24hFilterMode = "none"
     use_oi_24h: bool = False
     oi_24h_filter: Oi24hFilterMode = "none"
+    use_atr_24h: bool = False
+    atr_24h_filter: Atr24hFilterMode = "none"
+    atr_24h_period: int = ATR_24H_PERIOD_DEFAULT
     use_divergence: bool = False
     div_kinds: frozenset[DivKind] = frozenset({"bearish", "bullish"})
     compute_divergence: bool = True
+    use_price_compression: bool = False
+    compression_filter: CompressionFilterMode = "active"
+    compression_tf_pivot_defaults: bool = True
+    compression_pivot_left: int = 5
+    compression_pivot_right: int = 5
+    compression_min_pivots: int = 3
+    compression_min_touches: int = 3
+    compression_lookback_bars: int = 20
+    compression_max_ratio: float = 0.65
+    compression_max_slope: float = 0.08
+    compression_touch_tolerance: float = 0.08
+    compression_analysis_bars: int = 120
+    compression_min_score: int = 75
 
     def any_active(self) -> bool:
         return bool(
@@ -151,7 +206,28 @@ class ScannerSearchCriteria:
             or self.use_sma
             or self.use_cum_delta_24h
             or self.use_oi_24h
+            or self.use_atr_24h
             or self.use_divergence
+            or self.use_price_compression
+        )
+
+    def compression_params_for_tf(self, tf_key: str) -> CompressionParams:
+        if self.compression_tf_pivot_defaults:
+            base = default_compression_params_for_tf(tf_key)
+            pl, pr = int(base.pivot_left), int(base.pivot_right)
+        else:
+            pl, pr = int(self.compression_pivot_left), int(self.compression_pivot_right)
+        return CompressionParams(
+            pivot_left=pl,
+            pivot_right=pr,
+            min_pivots=int(self.compression_min_pivots),
+            min_touches=int(self.compression_min_touches),
+            lookback_bars=int(self.compression_lookback_bars),
+            max_compression_ratio=float(self.compression_max_ratio),
+            max_mid_slope_pct_per_bar=float(self.compression_max_slope),
+            touch_tolerance=float(self.compression_touch_tolerance),
+            analysis_bars=int(self.compression_analysis_bars),
+            min_score=int(self.compression_min_score),
         )
 
 
@@ -163,15 +239,32 @@ def search_criteria_summary_ru(criteria: ScannerSearchCriteria) -> str:
         lbl = {"above": "цена выше SMA", "below": "цена ниже SMA"}.get(criteria.sma_filter_mode, criteria.sma_filter_mode)
         parts.append(f"SMA ({lbl})")
     if criteria.use_cum_delta_24h and criteria.cum_delta_24h_filter != "none":
-        parts.append(CUM_DELTA_24H_LABEL_RU.get(criteria.cum_delta_24h_filter, criteria.cum_delta_24h_filter))
+        lbl = CUM_DELTA_24H_LABEL_RU.get(criteria.cum_delta_24h_filter, criteria.cum_delta_24h_filter)
+        if criteria.cum_delta_24h_filter == "top":
+            parts.append(f"Δкум: {lbl}")
+        else:
+            parts.append(lbl)
     if criteria.use_oi_24h and criteria.oi_24h_filter != "none":
-        parts.append(OI_24H_LABEL_RU.get(criteria.oi_24h_filter, criteria.oi_24h_filter))
+        lbl = OI_24H_LABEL_RU.get(criteria.oi_24h_filter, criteria.oi_24h_filter)
+        if criteria.oi_24h_filter == "top":
+            parts.append(f"ΔOI: {lbl}")
+        else:
+            parts.append(lbl)
+    if criteria.use_atr_24h and criteria.atr_24h_filter != "none":
+        lbl = ATR_24H_LABEL_RU.get(criteria.atr_24h_filter, criteria.atr_24h_filter)
+        if criteria.atr_24h_filter == "top":
+            parts.append(f"ΔATR({int(criteria.atr_24h_period)}): {lbl}")
+        else:
+            parts.append(f"ΔATR({int(criteria.atr_24h_period)}): {lbl}")
     if criteria.use_divergence:
         if len(criteria.div_kinds) == 1:
             k = next(iter(criteria.div_kinds))
             parts.append(f"δ {DIV_LABEL_RU.get(k, k)}")
         else:
             parts.append("δ любая")
+    if criteria.use_price_compression:
+        lbl = "активное сжатие" if criteria.compression_filter == "active" else "топ Score"
+        parts.append(f"Price Compression ({lbl}, min {int(criteria.compression_min_score)})")
     return " · ".join(parts) if parts else "критерии не выбраны"
 
 
@@ -197,10 +290,21 @@ def passes_divergence_filter(hit: WilliamsHit, criteria: ScannerSearchCriteria) 
     return hit.div_kind in criteria.div_kinds
 
 
+def passes_price_compression_filter(hit: WilliamsHit, criteria: ScannerSearchCriteria) -> bool:
+    if not criteria.use_price_compression:
+        return True
+    if criteria.compression_filter == "top":
+        return np.isfinite(hit.compression_score)
+    return np.isfinite(hit.compression_score) and float(hit.compression_score) >= float(
+        criteria.compression_min_score
+    )
+
+
 def passes_hit_search_criteria(
     hit: WilliamsHit,
     cd24: float | None,
     oi24: float | None,
+    atr24: float | None,
     criteria: ScannerSearchCriteria,
 ) -> bool:
     if not criteria.any_active():
@@ -217,8 +321,14 @@ def passes_hit_search_criteria(
     if criteria.use_oi_24h:
         if not passes_oi_24h_filter(oi24, criteria.oi_24h_filter):
             return False
+    if criteria.use_atr_24h:
+        if not passes_atr_24h_filter(atr24, criteria.atr_24h_filter):
+            return False
     if criteria.use_divergence:
         if not passes_divergence_filter(hit, criteria):
+            return False
+    if criteria.use_price_compression:
+        if not passes_price_compression_filter(hit, criteria):
             return False
     return True
 
@@ -238,6 +348,14 @@ class WilliamsHit:
     div_bars_ago: int | None = None
     cum_delta_24h_change: float = float("nan")
     oi_24h_change: float = float("nan")
+    atr_24h_change: float = float("nan")
+    compression_score: float = float("nan")
+    compression_ratio: float = float("nan")
+    compression_upper_touches: int = 0
+    compression_lower_touches: int = 0
+    compression_upper: float = float("nan")
+    compression_lower: float = float("nan")
+    compression_formation_bars: int = 0
 
 
 def fetch_spot_klines(symbol: str, interval: str, limit: int = 120) -> pd.DataFrame:
@@ -347,6 +465,8 @@ def passes_cum_delta_24h_filter(
         return float(change) > 0.0
     if mode == "down":
         return float(change) < 0.0
+    if mode == "top":
+        return True
     return True
 
 
@@ -421,6 +541,103 @@ def passes_oi_24h_filter(
         return float(change) > 0.0
     if mode == "down":
         return float(change) < 0.0
+    if mode == "top":
+        return True
+    return True
+
+
+def compute_atr_change_24h(
+    kl: pd.DataFrame,
+    *,
+    period: int = ATR_24H_PERIOD_DEFAULT,
+    use_closed_bar: bool = True,
+) -> float | None:
+    """
+    Прирост ATR за последние 24 ч: ATR[eval] − ATR[бар ≤ eval−24h].
+    ATR — Wilder RMA от True Range на spot OHLC.
+    """
+    if kl is None or kl.empty:
+        return None
+    df = kl.sort_values("open_time").reset_index(drop=True)
+    n_period = max(1, int(period))
+    if len(df) < n_period + 5:
+        return None
+    atr = average_true_range(df, period=n_period)
+    eval_idx = len(df) - 2 if use_closed_bar and len(df) >= 2 else len(df) - 1
+    open_ms = pd.to_numeric(df["open_time"], errors="coerce").to_numpy(dtype=np.float64)
+    if not np.isfinite(open_ms[eval_idx]):
+        return None
+    ref_ms = float(open_ms[eval_idx]) - 24.0 * 60.0 * 60.0 * 1000.0
+    idx_arr = np.arange(len(open_ms), dtype=np.int64)
+    valid = open_ms <= ref_ms
+    if not valid.any():
+        return None
+    ref_idx = int(idx_arr[valid].max())
+    a_eval = float(atr.iloc[eval_idx])
+    a_ref = float(atr.iloc[ref_idx])
+    if not np.isfinite(a_eval) or not np.isfinite(a_ref):
+        return None
+    change = a_eval - a_ref
+    if not np.isfinite(change):
+        return None
+    return change
+
+
+def fetch_atr_24h_change(
+    symbol: str,
+    *,
+    period: int = ATR_24H_PERIOD_DEFAULT,
+    use_closed_bar: bool = True,
+) -> float | None:
+    sym = symbol.upper()
+    try:
+        kl = fetch_spot_klines(sym, ATR_24H_INTERVAL, ATR_24H_KLINES_LIMIT)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return None
+    return compute_atr_change_24h(kl, period=period, use_closed_bar=use_closed_bar)
+
+
+def prefetch_atr_24h_map(
+    symbols: list[str],
+    *,
+    period: int = ATR_24H_PERIOD_DEFAULT,
+    use_closed_bar: bool = True,
+    max_workers: int = 12,
+) -> dict[str, float | None]:
+    """Кэш прироста ATR за 24 ч по символам (spot 15m, один запрос на пару)."""
+    syms = sorted({s.upper() for s in symbols if s})
+    out: dict[str, float | None] = {s: None for s in syms}
+    if not syms:
+        return out
+    workers = max(4, min(20, int(max_workers)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {
+            ex.submit(fetch_atr_24h_change, sym, period=period, use_closed_bar=use_closed_bar): sym
+            for sym in syms
+        }
+        for fut in as_completed(futs):
+            sym = futs[fut]
+            try:
+                out[sym] = fut.result()
+            except Exception:
+                out[sym] = None
+    return out
+
+
+def passes_atr_24h_filter(
+    change: float | None,
+    mode: Atr24hFilterMode,
+) -> bool:
+    if mode == "none":
+        return True
+    if change is None or not np.isfinite(change):
+        return False
+    if mode == "up":
+        return float(change) > 0.0
+    if mode == "down":
+        return float(change) < 0.0
+    if mode == "top":
+        return True
     return True
 
 
@@ -474,9 +691,13 @@ def klines_limit_for_williams(
     pivot_right: int = 5,
     min_bars_between: int = 10,
     div_max_age_bars: int = 30,
+    compression_analysis_bars: int = 120,
+    compression_lookback_bars: int = 20,
 ) -> int:
     n = max(int(length), int(ema_length), int(sma_length))
     lim = max(60, n + int(ema_length) + int(extra))
+    comp_need = int(compression_analysis_bars) + int(compression_lookback_bars) + 30
+    lim = max(lim, comp_need)
     if check_divergence:
         need = int(pivot_left) + int(pivot_right) + max(int(min_bars_between), 3) + int(div_max_age_bars) + 10
         lim = max(lim, need)
@@ -530,6 +751,8 @@ def evaluate_symbol_williams(
     div_max_age_bars: int = 30,
     div_kinds: frozenset[DivKind] | None = None,
     compute_divergence: bool = True,
+    compression_params: CompressionParams | None = None,
+    compression_active_only: bool = True,
 ) -> WilliamsHit | None:
     """
     Одна пара + один ТФ: метрики Williams, SMA, δ (без отбора — фильтр в ScannerSearchCriteria).
@@ -547,6 +770,8 @@ def evaluate_symbol_williams(
         pivot_right=pivot_right,
         min_bars_between=min_bars_between,
         div_max_age_bars=div_max_age_bars,
+        compression_analysis_bars=int(compression_params.analysis_bars) if compression_params else 120,
+        compression_lookback_bars=int(compression_params.lookback_bars) if compression_params else 20,
     )
     try:
         kl = fetch_spot_klines(sym, api_iv, lim)
@@ -613,6 +838,32 @@ def evaluate_symbol_williams(
 
     ts = pd.to_datetime(kl["open_time"].iloc[eval_idx], unit="ms", utc=True)
     close_v = float(kl["close"].iloc[eval_idx])
+
+    comp_score = float("nan")
+    comp_ratio = float("nan")
+    comp_up_touches = 0
+    comp_lo_touches = 0
+    comp_upper = float("nan")
+    comp_lower = float("nan")
+    comp_formation = 0
+    if compression_params is not None:
+        work = kl.copy()
+        work["timestamp"] = pd.to_datetime(work["open_time"], unit="ms", utc=True)
+        comp_zone = compression_zone_for_scanner(
+            work,
+            compression_params,
+            use_closed_bar=use_closed_bar,
+            active_only=compression_active_only,
+        )
+        if comp_zone is not None:
+            comp_score = float(comp_zone.score)
+            comp_ratio = float(comp_zone.compression_ratio)
+            comp_up_touches = int(comp_zone.upper_touches)
+            comp_lo_touches = int(comp_zone.lower_touches)
+            comp_upper = float(comp_zone.upper_price)
+            comp_lower = float(comp_zone.lower_price)
+            comp_formation = int(comp_zone.formation_bars)
+
     return WilliamsHit(
         symbol=sym,
         tf_key=tf_key,
@@ -627,6 +878,14 @@ def evaluate_symbol_williams(
         div_bars_ago=div_bars_ago,
         cum_delta_24h_change=float("nan"),
         oi_24h_change=float("nan"),
+        atr_24h_change=float("nan"),
+        compression_score=comp_score,
+        compression_ratio=comp_ratio,
+        compression_upper_touches=comp_up_touches,
+        compression_lower_touches=comp_lo_touches,
+        compression_upper=comp_upper,
+        compression_lower=comp_lower,
+        compression_formation_bars=comp_formation,
     )
 
 
@@ -653,6 +912,14 @@ def hits_to_dataframe(hits: Iterable[WilliamsHit], *, vol_map: dict[str, float] 
                 "div_bars_ago": h.div_bars_ago,
                 "cum_delta_24h_change": h.cum_delta_24h_change,
                 "oi_24h_change": h.oi_24h_change,
+                "atr_24h_change": h.atr_24h_change,
+                "compression_score": h.compression_score,
+                "compression_ratio": h.compression_ratio,
+                "compression_upper_touches": h.compression_upper_touches,
+                "compression_lower_touches": h.compression_lower_touches,
+                "compression_upper": h.compression_upper,
+                "compression_lower": h.compression_lower,
+                "compression_formation_bars": h.compression_formation_bars,
             }
         )
     if not rows:
@@ -675,6 +942,14 @@ def hits_to_dataframe(hits: Iterable[WilliamsHit], *, vol_map: dict[str, float] 
                 "div_bars_ago",
                 "cum_delta_24h_change",
                 "oi_24h_change",
+                "atr_24h_change",
+                "compression_score",
+                "compression_ratio",
+                "compression_upper_touches",
+                "compression_lower_touches",
+                "compression_upper",
+                "compression_lower",
+                "compression_formation_bars",
             ]
         )
     df = pd.DataFrame(rows)
@@ -697,6 +972,119 @@ def sort_scanner_results_by_age(df: pd.DataFrame | None, *, ascending: bool = Tr
     return out.drop(columns=["_sort_time"]).reset_index(drop=True)
 
 
+def sort_scanner_results(df: pd.DataFrame | None, mode: ScannerSortMode) -> pd.DataFrame:
+    """Сортировка таблицы результатов сканера."""
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+    out = df.copy()
+    if mode == "bar_time":
+        return sort_scanner_results_by_age(out)
+    if mode == "cum_delta_desc" and "cum_delta_24h_change" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["cum_delta_24h_change"], errors="coerce"))
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    if mode == "oi_desc" and "oi_24h_change" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["oi_24h_change"], errors="coerce"))
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    if mode == "atr_desc" and "atr_24h_change" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["atr_24h_change"], errors="coerce"))
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    if mode == "cum_delta_abs" and "cum_delta_24h_change" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["cum_delta_24h_change"], errors="coerce").abs())
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    if mode == "oi_abs" and "oi_24h_change" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["oi_24h_change"], errors="coerce").abs())
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    if mode == "atr_abs" and "atr_24h_change" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["atr_24h_change"], errors="coerce").abs())
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    if mode == "compression_score_desc" and "compression_score" in out.columns:
+        return (
+            out.assign(_v=pd.to_numeric(out["compression_score"], errors="coerce"))
+            .sort_values(["_v", "symbol", "timeframe"], ascending=[False, True, True], na_position="last")
+            .drop(columns=["_v"])
+            .reset_index(drop=True)
+        )
+    return sort_scanner_results_by_age(out)
+
+
+def _top_symbols_by_column(df: pd.DataFrame, col: str, top_n: int) -> set[str]:
+    if df.empty or col not in df.columns:
+        return set()
+    grouped = df.groupby("symbol")[col].apply(
+        lambda s: pd.to_numeric(s, errors="coerce").abs().max()
+    )
+    grouped = grouped.dropna()
+    if grouped.empty:
+        return set()
+    n = max(1, min(int(top_n), len(grouped)))
+    return set(grouped.nlargest(n).index.astype(str))
+
+
+def apply_top_change_filters(
+    df: pd.DataFrame,
+    criteria: ScannerSearchCriteria,
+    *,
+    top_n: int = 50,
+) -> pd.DataFrame:
+    """Оставляет топ-N пар по |Δкум| и/или |ΔOI| (логика AND между активными top-критериями)."""
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+
+    sym_sets: list[set[str]] = []
+    if criteria.use_cum_delta_24h and criteria.cum_delta_24h_filter == "top":
+        sym_sets.append(_top_symbols_by_column(df, "cum_delta_24h_change", top_n))
+    if criteria.use_oi_24h and criteria.oi_24h_filter == "top":
+        sym_sets.append(_top_symbols_by_column(df, "oi_24h_change", top_n))
+    if criteria.use_atr_24h and criteria.atr_24h_filter == "top":
+        sym_sets.append(_top_symbols_by_column(df, "atr_24h_change", top_n))
+    if criteria.use_price_compression and criteria.compression_filter == "top":
+        sym_sets.append(_top_symbols_by_column(df, "compression_score", top_n))
+
+    if not sym_sets:
+        return df.reset_index(drop=True)
+
+    keep = sym_sets[0]
+    for s in sym_sets[1:]:
+        keep &= s
+    if not keep:
+        return df.iloc[0:0].copy()
+
+    out = df[df["symbol"].astype(str).isin(keep)].copy()
+    if criteria.use_cum_delta_24h and criteria.cum_delta_24h_filter == "top":
+        out = sort_scanner_results(out, "cum_delta_abs")
+    elif criteria.use_oi_24h and criteria.oi_24h_filter == "top":
+        out = sort_scanner_results(out, "oi_abs")
+    elif criteria.use_atr_24h and criteria.atr_24h_filter == "top":
+        out = sort_scanner_results(out, "atr_abs")
+    elif criteria.use_price_compression and criteria.compression_filter == "top":
+        out = sort_scanner_results(out, "compression_score_desc")
+    return out.reset_index(drop=True)
+
+
 def _scan_task(args: tuple) -> WilliamsHit | None:
     (
         sym,
@@ -713,7 +1101,12 @@ def _scan_task(args: tuple) -> WilliamsHit | None:
         criteria,
         cum_delta_24h_change,
         oi_24h_change,
+        atr_24h_change,
     ) = args
+    comp_params = criteria.compression_params_for_tf(tf_key) if criteria.use_price_compression else None
+    comp_active_only = not (
+        criteria.use_price_compression and criteria.compression_filter == "top"
+    )
     hit = evaluate_symbol_williams(
         sym,
         tf_key,
@@ -727,15 +1120,19 @@ def _scan_task(args: tuple) -> WilliamsHit | None:
         min_bars_between=min_bars_between,
         div_max_age_bars=div_max_age_bars,
         div_kinds=div_kinds,
+        compression_params=comp_params,
+        compression_active_only=comp_active_only,
     )
     if hit is None:
         return None
     cd24 = cum_delta_24h_change
     oi24 = oi_24h_change
-    if not passes_hit_search_criteria(hit, cd24, oi24, criteria):
+    atr24 = atr_24h_change
+    if not passes_hit_search_criteria(hit, cd24, oi24, atr24, criteria):
         return None
     cd_v = float(cd24) if cd24 is not None and np.isfinite(cd24) else float("nan")
     oi_v = float(oi24) if oi24 is not None and np.isfinite(oi24) else float("nan")
+    atr_v = float(atr24) if atr24 is not None and np.isfinite(atr24) else float("nan")
     return WilliamsHit(
         symbol=hit.symbol,
         tf_key=hit.tf_key,
@@ -750,6 +1147,14 @@ def _scan_task(args: tuple) -> WilliamsHit | None:
         div_bars_ago=hit.div_bars_ago,
         cum_delta_24h_change=cd_v,
         oi_24h_change=oi_v,
+        atr_24h_change=atr_v,
+        compression_score=hit.compression_score,
+        compression_ratio=hit.compression_ratio,
+        compression_upper_touches=hit.compression_upper_touches,
+        compression_lower_touches=hit.compression_lower_touches,
+        compression_upper=hit.compression_upper,
+        compression_lower=hit.compression_lower,
+        compression_formation_bars=hit.compression_formation_bars,
     )
 
 
@@ -768,6 +1173,7 @@ def run_williams_scan(
     pivot_right: int = 5,
     min_bars_between: int = 10,
     div_max_age_bars: int = 30,
+    top_n_delta: int = 50,
 ) -> pd.DataFrame:
     """
     Параллельный скан: symbols × tf_keys.
@@ -792,13 +1198,20 @@ def run_williams_scan(
         use_closed_bar=bool(use_closed_bar),
         max_workers=max_workers,
     )
+    atr24_map = prefetch_atr_24h_map(
+        syms,
+        period=int(crit.atr_24h_period),
+        use_closed_bar=bool(use_closed_bar),
+        max_workers=max_workers,
+    )
 
     scan_tfs = list(tfs)
     if (
-        (crit.use_cum_delta_24h or crit.use_oi_24h)
+        (crit.use_cum_delta_24h or crit.use_oi_24h or crit.use_atr_24h)
         and not crit.use_williams
         and not crit.use_sma
         and not crit.use_divergence
+        and not crit.use_price_compression
         and scan_tfs
     ):
         scan_tfs = [scan_tfs[0]]
@@ -820,6 +1233,7 @@ def run_williams_scan(
             crit,
             cd24_map.get(sym),
             oi24_map.get(sym),
+            atr24_map.get(sym),
         )
         for sym in syms
         for tf in scan_tfs
@@ -848,4 +1262,5 @@ def run_williams_scan(
         vol_map = fetch_spot_24h_quote_volume()
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
         pass
-    return hits_to_dataframe(hits, vol_map=vol_map)
+    df = hits_to_dataframe(hits, vol_map=vol_map)
+    return apply_top_change_filters(df, crit, top_n=top_n_delta)

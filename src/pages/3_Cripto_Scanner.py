@@ -41,7 +41,17 @@ from telegram_notify import (
     telegram_filters_summary,
     telegram_profile_filters_rows,
 )
+from price_compression import (
+    RECOMMENDED_COMPRESSION_HELP_RU,
+    apply_recommended_compression_session_state,
+    compression_params_from_session,
+    default_compression_params_for_tf,
+    init_compression_session_state,
+)
 from williams_scanner import (
+    ATR_24H_INTERVAL,
+    ATR_24H_LABEL_RU,
+    ATR_24H_PERIOD_DEFAULT,
     CUM_DELTA_24H_INTERVAL,
     CUM_DELTA_24H_LABEL_RU,
     DIV_LABEL_RU,
@@ -50,15 +60,20 @@ from williams_scanner import (
     SCANNER_TF_API,
     SCANNER_TF_LABELS_RU,
     ZONE_LABEL_RU,
+    Atr24hFilterMode,
+    CompressionFilterMode,
     CumDelta24hFilterMode,
     DivKind,
     Oi24hFilterMode,
     ScannerSearchCriteria,
+    ScannerSortMode,
+    SCANNER_SORT_LABELS_RU,
     WilliamsZone,
     search_criteria_summary_ru,
     fetch_spot_24h_quote_volume,
     format_timedelta_ru,
     run_williams_scan,
+    sort_scanner_results,
     sort_scanner_results_by_age,
 )
 
@@ -152,6 +167,14 @@ def _show_results(
             "div_bars_ago": "Див. баров назад",
             "cum_delta_24h_change": "Δкум. 24ч",
             "oi_24h_change": "ΔOI 24ч",
+            "atr_24h_change": "ΔATR 24ч",
+            "compression_score": "Comp. Score",
+            "compression_ratio": "Comp. ratio",
+            "compression_upper_touches": "Касания ↑",
+            "compression_lower_touches": "Касания ↓",
+            "compression_upper": "Граница ↑",
+            "compression_lower": "Граница ↓",
+            "compression_formation_bars": "Формир. (бар)",
         }
     )
     show_cols = [
@@ -160,6 +183,14 @@ def _show_results(
         "Зона",
         "Δкум. 24ч",
         "ΔOI 24ч",
+        "ΔATR 24ч",
+        "Comp. Score",
+        "Comp. ratio",
+        "Граница ↑",
+        "Граница ↓",
+        "Формир. (бар)",
+        "Касания ↑",
+        "Касания ↓",
         "Дивергенция δ",
         "Подтв. див. (UTC)",
         "Див. баров назад",
@@ -182,6 +213,17 @@ def _show_results(
             "SMA Close": st.column_config.NumberColumn(format="%.6f"),
             "Δкум. 24ч": st.column_config.NumberColumn(format="%.4g"),
             "ΔOI 24ч": st.column_config.NumberColumn(format="%.4g"),
+            "ΔATR 24ч": st.column_config.NumberColumn(format="%.6g"),
+            "Comp. Score": st.column_config.NumberColumn(format="%.0f"),
+            "Comp. ratio": st.column_config.NumberColumn(
+                format="%.3f",
+                help="CurrentWidth/PreviousWidth; меньше — сильнее сжатие.",
+            ),
+            "Граница ↑": st.column_config.NumberColumn(format="%.6g"),
+            "Граница ↓": st.column_config.NumberColumn(format="%.6g"),
+            "Формир. (бар)": st.column_config.NumberColumn(format="%d"),
+            "Касания ↑": st.column_config.NumberColumn(format="%d"),
+            "Касания ↓": st.column_config.NumberColumn(format="%d"),
             "Объём 24h USDT": st.column_config.NumberColumn(format="%.0f"),
         },
     )
@@ -209,12 +251,25 @@ def _show_results(
             st.markdown(f"- {lbl}")
         st.markdown(
             f"**Кум. δ за 24 ч** — прирост на **{CUM_DELTA_24H_INTERVAL}** "
-            "(δ = 2×taker buy − volume); фильтр по знаку прироста."
+            "(δ = 2×taker buy − volume); рост / падение / **топ по |изменению|**."
         )
         st.markdown(
             f"**Open Interest за 24 ч** — прирост OI на **{OI_24H_INTERVAL}** "
-            "(USDT-M perpetual); фильтр по росту / падению."
+            "(USDT-M perpetual); рост / падение / **топ по |изменению|**."
         )
+        st.markdown(
+            f"**ATR за 24 ч** — прирост ATR({ATR_24H_PERIOD_DEFAULT}) на **{ATR_24H_INTERVAL}** spot; "
+            "рост / падение / **топ по |изменению|** (падение = сжатие волатильности)."
+        )
+        st.markdown(
+            "**Price Compression** — Pivot High/Low + регрессия границ; "
+            "Score 0–100 (сжатие 40%, касания 25%, горизонтальность 20%, длительность 15%); "
+            "активная зона или **топ по Score**."
+        )
+
+
+def _init_scanner_compression_defaults() -> None:
+    init_compression_session_state(st.session_state, "sl_sc", only_missing=True)
 
 
 def _execute_scan(
@@ -231,6 +286,7 @@ def _execute_scan(
     min_bars_between: int,
     div_max_age_bars: int,
     search_criteria: ScannerSearchCriteria,
+    top_n_delta: int,
 ) -> pd.DataFrame:
     progress = st.progress(0.0, text="Подготовка…")
 
@@ -252,6 +308,7 @@ def _execute_scan(
             pivot_right=pivot_right,
             min_bars_between=min_bars_between,
             div_max_age_bars=div_max_age_bars,
+            top_n_delta=int(top_n_delta),
         )
     progress.empty()
     return df
@@ -608,6 +665,8 @@ def _run_scanner_body(
     tg_filters: TelegramNotifyFilters,
     tg_proxy: str,
     show_sma_column: bool,
+    result_sort: ScannerSortMode,
+    top_n_delta: int,
 ) -> None:
     if scan_btn:
         df = _execute_scan(
@@ -623,6 +682,7 @@ def _run_scanner_body(
             min_bars_between=min_bars_between,
             div_max_age_bars=div_max_age_bars,
             search_criteria=search_criteria,
+            top_n_delta=top_n_delta,
         )
         st.session_state["williams_scan_df"] = df
         if tg_on_manual:
@@ -659,6 +719,7 @@ def _run_scanner_body(
                 min_bars_between=min_bars_between,
                 div_max_age_bars=div_max_age_bars,
                 search_criteria=search_criteria,
+                top_n_delta=top_n_delta,
             )
             st.session_state["williams_scan_df"] = df
             _notify_telegram_if_needed(
@@ -687,17 +748,18 @@ def _run_scanner_body(
         return
 
     df_all = st.session_state["williams_scan_df"]
+    df_sorted = sort_scanner_results(df_all, result_sort)
     if tg_enabled and telegram_profile_filters_rows(tg_profile):
-        df_show = apply_telegram_row_filters(df_all, tg_filters)
-        df_show = sort_scanner_results_by_age(df_show)
+        df_show = apply_telegram_row_filters(df_sorted, tg_filters)
+        df_show = sort_scanner_results(df_show, result_sort)
         _show_results(
             df_show,
             filter_note=telegram_filters_summary(tg_filters, profile=tg_profile),
-            df_full=df_all if len(df_show) != len(df_all) else None,
+            df_full=df_sorted if len(df_show) != len(df_sorted) else None,
             show_sma_column=show_sma_column,
         )
     else:
-        _show_results(sort_scanner_results_by_age(df_all), show_sma_column=show_sma_column)
+        _show_results(df_sorted, show_sma_column=show_sma_column)
     tg_status = st.session_state.get("williams_tg_last_status")
     if tg_enabled and tg_status:
         st.caption(f"Telegram: **{tg_status}**")
@@ -714,11 +776,12 @@ def main() -> None:
     st.title("Cripto Scanner")
     st.markdown(
         "Поиск по **всем USDT spot** парам Binance. В сайдбаре отметьте **нужные критерии** "
-        "(Williams, SMA, Δкум. 24ч, ΔOI 24ч, дивергенция) — в результат попадут строки, где выполнены **все** отмеченные."
+        "(Williams, SMA, Price Compression, Δкум. 24ч, ΔOI 24ч, ΔATR 24ч, дивергенция) — в результат попадут строки, где выполнены **все** отмеченные."
     )
 
     with st.sidebar:
         render_auth_sidebar(auth_user)
+        _init_scanner_compression_defaults()
         st.markdown("**Параметры сканера**")
         st.caption("Отметьте критерии поиска — в результат попадут строки, где выполнены **все** отмеченные.")
 
@@ -727,7 +790,7 @@ def main() -> None:
             options=list(SCANNER_TF_API.keys()),
             default=["15m", "1h", "4h"],
             format_func=lambda k: SCANNER_TF_LABELS_RU.get(k, k),
-            help="Для Williams, SMA и дивергенции. При поиске только по Δкум./ΔOI 24ч используется первый выбранный ТФ.",
+            help="Для Williams, SMA, Price Compression и дивергенции. При поиске только по Δкум./ΔOI/ΔATR 24ч используется первый выбранный ТФ.",
         )
 
         use_williams = st.checkbox(
@@ -780,6 +843,113 @@ def main() -> None:
             key="cb_show_sma_col",
         )
 
+        st.markdown("---")
+        st.markdown("**Price Compression**")
+        use_price_compression = st.checkbox(
+            "Сжатие цены (Pivot + регрессия)",
+            value=False,
+            key="cb_use_price_compression",
+            help="Тот же алгоритм, что на главном графике: подтверждённые pivot, границы МНК, Score 0–100.",
+        )
+        compression_filter: CompressionFilterMode = "active"
+        compression_tf_pivot_defaults = True
+        if use_price_compression:
+            compression_tf_pivot_defaults = st.checkbox(
+                "Pivot по таймфрейму (15m→3/3, 1h→5/5)",
+                value=True,
+                key="cb_compression_tf_pivot",
+            )
+            compression_filter = st.radio(
+                "Режим отбора",
+                options=["active", "top"],
+                index=0,
+                format_func=lambda x: {
+                    "active": "Активное сжатие на последнем баре",
+                    "top": "Топ N пар по Compression Score",
+                }[x],
+                key="rb_compression_filter",
+            )  # type: ignore[assignment]
+            with st.expander("Параметры Price Compression", expanded=True):
+                if st.button(
+                    "Рекомендуемые параметры",
+                    key="btn_sc_pc_recommended",
+                    use_container_width=True,
+                    help="Сброс: pivot 3, касания 3, ratio 0.65, slope 0.08, окно 120, Score 75.",
+                ):
+                    if compression_tf_pivot_defaults and tf_keys:
+                        hint = default_compression_params_for_tf(str(tf_keys[0]))
+                        apply_recommended_compression_session_state(
+                            st.session_state,
+                            "sl_sc",
+                            pivot_left=hint.pivot_left,
+                            pivot_right=hint.pivot_right,
+                        )
+                    else:
+                        apply_recommended_compression_session_state(st.session_state, "sl_sc")
+                    st.rerun()
+                if not compression_tf_pivot_defaults:
+                    st.slider("Pivot Left", 2, 12, key="sl_sc_pivot_left")
+                    st.slider("Pivot Right", 2, 12, key="sl_sc_pivot_right")
+                st.slider(
+                    "Мин. Pivot на границу",
+                    2,
+                    8,
+                    key="sl_sc_min_pivots",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_pivots"],
+                )
+                st.slider(
+                    "Мин. касаний (верх и низ)",
+                    2,
+                    8,
+                    key="sl_sc_min_touches",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_touches"],
+                )
+                st.slider(
+                    "Период сравнения ширины",
+                    8,
+                    60,
+                    key="sl_sc_lookback",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["lookback_bars"],
+                )
+                st.slider(
+                    "Макс. коэффициент сжатия",
+                    min_value=0.40,
+                    max_value=0.95,
+                    step=0.01,
+                    key="sl_sc_max_ratio",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["max_compression_ratio"],
+                )
+                st.slider(
+                    "Макс. наклон середины (%/бар)",
+                    min_value=0.06,
+                    max_value=0.15,
+                    step=0.01,
+                    key="sl_sc_max_slope",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["max_mid_slope_pct_per_bar"],
+                )
+                st.slider(
+                    "Допуск касания",
+                    min_value=0.04,
+                    max_value=0.25,
+                    step=0.01,
+                    key="sl_sc_touch_tol",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["touch_tolerance"],
+                )
+                st.slider(
+                    "Окно анализа (баров)",
+                    60,
+                    300,
+                    key="sl_sc_analysis",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["analysis_bars"],
+                )
+                st.slider(
+                    "Мин. Compression Score",
+                    30,
+                    90,
+                    key="sl_sc_min_score",
+                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_score"],
+                )
+
         use_cum_delta_24h = st.checkbox(
             f"Кум. δ за 24 ч ({CUM_DELTA_24H_INTERVAL})",
             value=False,
@@ -789,11 +959,11 @@ def main() -> None:
         if use_cum_delta_24h:
             cum_delta_24h_filter = st.radio(
                 "Направление Δкум. 24ч",
-                options=["up", "down"],
+                options=["up", "down", "top"],
                 index=0,
                 format_func=lambda x: CUM_DELTA_24H_LABEL_RU.get(x, x),  # type: ignore[arg-type]
                 key="rb_cum_delta_24h_filter",
-                help="δ = 2×taker buy − volume; один запрос 15m на пару.",
+                help="δ = 2×taker buy − volume; «Наибольшее изменение» — топ пар по |Δкум|.",
             )
 
         use_oi_24h = st.checkbox(
@@ -805,12 +975,68 @@ def main() -> None:
         if use_oi_24h:
             oi_24h_filter = st.radio(
                 "Направление ΔOI 24ч",
-                options=["up", "down"],
+                options=["up", "down", "top"],
                 index=0,
                 format_func=lambda x: OI_24H_LABEL_RU.get(x, x),  # type: ignore[arg-type]
                 key="rb_oi_24h_filter",
-                help="USDT-M perpetual; один запрос 15m на пару.",
+                help="USDT-M perpetual; «Наибольшее изменение» — топ пар по |ΔOI|.",
             )
+
+        use_atr_24h = st.checkbox(
+            f"ATR за 24 ч ({ATR_24H_INTERVAL})",
+            value=False,
+            key="cb_use_atr_24h",
+        )
+        atr_24h_filter: Atr24hFilterMode = "down"
+        atr_24h_period = ATR_24H_PERIOD_DEFAULT
+        if use_atr_24h:
+            atr_24h_period = int(
+                st.slider(
+                    "ATR · период",
+                    min_value=2,
+                    max_value=50,
+                    value=ATR_24H_PERIOD_DEFAULT,
+                    key="sl_atr_24h_period",
+                    help="Период ATR (Wilder), как на главном графике.",
+                )
+            )
+            atr_24h_filter = st.radio(
+                "Направление ΔATR 24ч",
+                options=["up", "down", "top"],
+                index=1,
+                format_func=lambda x: ATR_24H_LABEL_RU.get(x, x),  # type: ignore[arg-type]
+                key="rb_atr_24h_filter",
+                help="ΔATR = ATR сейчас − ATR 24 ч назад; «Падение» — сжатие волатильности.",
+            )
+
+        top_n_delta = 50
+        if (
+            (use_cum_delta_24h and cum_delta_24h_filter == "top")
+            or (use_oi_24h and oi_24h_filter == "top")
+            or (use_atr_24h and atr_24h_filter == "top")
+            or (use_price_compression and compression_filter == "top")
+        ):
+            top_n_delta = int(
+                st.number_input(
+                    "Топ N пар (по |изменению|)",
+                    min_value=5,
+                    max_value=300,
+                    value=50,
+                    step=5,
+                    key="ni_top_n_delta",
+                    help="При нескольких критериях «Наибольшее изменение» — пересечение топ-N.",
+                )
+            )
+
+        st.markdown("---")
+        st.markdown("**Сортировка таблицы**")
+        result_sort: ScannerSortMode = st.selectbox(
+            "Показать результаты",
+            options=list(SCANNER_SORT_LABELS_RU.keys()),
+            format_func=lambda k: SCANNER_SORT_LABELS_RU.get(k, k),  # type: ignore[arg-type]
+            index=0,
+            key="sb_result_sort",
+        )
 
         use_divergence = st.checkbox(
             "Дивергенция цена ↔ кум. δ",
@@ -952,7 +1178,15 @@ def main() -> None:
         st.warning("Выберите хотя бы один таймфрейм.")
         return
 
-    if not (use_williams or use_sma or use_cum_delta_24h or use_oi_24h or use_divergence):
+    if not (
+        use_williams
+        or use_sma
+        or use_cum_delta_24h
+        or use_oi_24h
+        or use_atr_24h
+        or use_divergence
+        or use_price_compression
+    ):
         st.warning("Отметьте **хотя бы один** критерий поиска в сайдбаре.")
         return
 
@@ -970,6 +1204,7 @@ def main() -> None:
     else:
         div_kinds = frozenset({"bearish", "bullish"})
 
+    sc_pc = compression_params_from_session(st.session_state, "sl_sc")
     search_criteria = ScannerSearchCriteria(
         use_williams=bool(use_williams),
         williams_zones=williams_zones,
@@ -979,9 +1214,25 @@ def main() -> None:
         cum_delta_24h_filter=cum_delta_24h_filter if use_cum_delta_24h else "none",
         use_oi_24h=bool(use_oi_24h),
         oi_24h_filter=oi_24h_filter if use_oi_24h else "none",
+        use_atr_24h=bool(use_atr_24h),
+        atr_24h_filter=atr_24h_filter if use_atr_24h else "none",
+        atr_24h_period=int(atr_24h_period),
         use_divergence=bool(use_divergence),
         div_kinds=div_kinds,
         compute_divergence=bool(use_divergence or compute_divergence),
+        use_price_compression=bool(use_price_compression),
+        compression_filter=compression_filter if use_price_compression else "active",  # type: ignore[arg-type]
+        compression_tf_pivot_defaults=bool(compression_tf_pivot_defaults),
+        compression_pivot_left=int(sc_pc.pivot_left),
+        compression_pivot_right=int(sc_pc.pivot_right),
+        compression_min_pivots=int(sc_pc.min_pivots),
+        compression_min_touches=int(sc_pc.min_touches),
+        compression_lookback_bars=int(sc_pc.lookback_bars),
+        compression_max_ratio=float(sc_pc.max_compression_ratio),
+        compression_max_slope=float(sc_pc.max_mid_slope_pct_per_bar),
+        compression_touch_tolerance=float(sc_pc.touch_tolerance),
+        compression_analysis_bars=int(sc_pc.analysis_bars),
+        compression_min_score=int(sc_pc.min_score),
     )
 
     tg_auto_scan_on = bool(tg_enabled and tg_ready and tg_auto_scan)
@@ -1071,9 +1322,25 @@ def main() -> None:
             cum_delta_24h_filter=search_criteria.cum_delta_24h_filter,
             use_oi_24h=search_criteria.use_oi_24h,
             oi_24h_filter=search_criteria.oi_24h_filter,
+            use_atr_24h=search_criteria.use_atr_24h,
+            atr_24h_filter=search_criteria.atr_24h_filter,
+            atr_24h_period=search_criteria.atr_24h_period,
             use_divergence=True if TG_PARAM_DIV in tg_active else search_criteria.use_divergence,
             div_kinds=aligned_div_kinds if TG_PARAM_DIV in tg_active else search_criteria.div_kinds,  # type: ignore[arg-type]
             compute_divergence=bool(search_criteria.compute_divergence or aligned_div),
+            use_price_compression=search_criteria.use_price_compression,
+            compression_filter=search_criteria.compression_filter,
+            compression_tf_pivot_defaults=search_criteria.compression_tf_pivot_defaults,
+            compression_pivot_left=search_criteria.compression_pivot_left,
+            compression_pivot_right=search_criteria.compression_pivot_right,
+            compression_min_pivots=search_criteria.compression_min_pivots,
+            compression_min_touches=search_criteria.compression_min_touches,
+            compression_lookback_bars=search_criteria.compression_lookback_bars,
+            compression_max_ratio=search_criteria.compression_max_ratio,
+            compression_max_slope=search_criteria.compression_max_slope,
+            compression_touch_tolerance=search_criteria.compression_touch_tolerance,
+            compression_analysis_bars=search_criteria.compression_analysis_bars,
+            compression_min_score=search_criteria.compression_min_score,
         )
         tg_profile_note += " · **скан = фильтр TG**"
     show_sma_column = bool(
@@ -1124,6 +1391,8 @@ def main() -> None:
         tg_filters=tg_filters,
         tg_proxy=tg_proxy if tg_ready else "",
         show_sma_column=show_sma_column,
+        result_sort=result_sort,
+        top_n_delta=top_n_delta,
     )
 
 

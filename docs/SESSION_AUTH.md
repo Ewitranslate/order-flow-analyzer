@@ -54,7 +54,7 @@
 ```toml
 [auth]
 auth_db = "data/auth.sqlite3"
-access_token_ttl_min = 15
+access_token_ttl_min = 60
 refresh_token_ttl_days = 7
 session_inactivity_days = 30
 ```
@@ -80,4 +80,4 @@ sqlite3 data/auth.sqlite3 "SELECT session_id, username, status, browser, created
 ```
 
 ### 5. JWT refresh
-Подождите истечения access TTL (или сократите `access_token_ttl_min` до 1) — страница должна продлить сессию без повторного входа.
+Подождите истечения access TTL (или сократите `access_token_ttl_min` до 1) — страница должна продлить сессию без повторного входа. Refresh-токен при продлении **не ротируется** (иначе параллельные rerun Streamlit инвалидировали бы друг друга).

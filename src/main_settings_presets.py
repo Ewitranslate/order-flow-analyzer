@@ -13,6 +13,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PRESETS_PATH = _PROJECT_ROOT / "data" / "main_presets.json"
 _PRESET_NAME_RE = re.compile(r"^[a-zA-Zа-яА-ЯёЁ0-9 _.\-]{1,64}$", re.UNICODE)
 _FLASH_KEY = "main_preset_flash"
+_PENDING_KEY = "main_preset_pending_apply"
 
 # Ключи session_state, которые входят в пресет
 PRESET_STATE_KEYS: tuple[str, ...] = (
@@ -32,11 +33,24 @@ PRESET_STATE_KEYS: tuple[str, ...] = (
     "cb_show_willy",
     "sl_willy_length",
     "sl_willy_ema_length",
+    "cb_show_atr",
+    "sl_atr_period",
     "cb_div_enabled",
     "cb_div_show_lines",
     "sl_div_pivot_left",
     "sl_div_pivot_right",
     "sl_div_min_bars",
+    "cb_show_compression",
+    "sl_pc_pivot_left",
+    "sl_pc_pivot_right",
+    "sl_pc_min_pivots",
+    "sl_pc_min_touches",
+    "sl_pc_lookback",
+    "sl_pc_max_ratio",
+    "sl_pc_max_slope",
+    "sl_pc_touch_tol",
+    "sl_pc_analysis",
+    "sl_pc_min_score",
 )
 
 
@@ -91,6 +105,20 @@ def apply_settings(data: dict[str, Any]) -> None:
                 st.session_state[key] = [str(x) for x in val]
             continue
         st.session_state[key] = val
+
+
+def queue_preset_apply(data: dict[str, Any]) -> None:
+    """Отложить применение до следующего прогона (до отрисовки виджетов)."""
+    st.session_state[_PENDING_KEY] = dict(data)
+
+
+def apply_pending_preset_before_widgets() -> bool:
+    """Применить отложенный пресет в начале сайдбара, до виджетов с теми же key."""
+    raw = st.session_state.pop(_PENDING_KEY, None)
+    if not isinstance(raw, dict):
+        return False
+    apply_settings(raw)
+    return True
 
 
 def save_preset(username: str, name: str, data: dict[str, Any]) -> str | None:
@@ -207,7 +235,7 @@ def render_main_presets_sidebar(username: str | None) -> None:
                 if not isinstance(data, dict):
                     _set_flash("error", "Пресет не найден.")
                 else:
-                    apply_settings(data)
+                    queue_preset_apply(data)
                     _set_flash("success", f"Применено: **{picked}**")
                 st.rerun()
         else:

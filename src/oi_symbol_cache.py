@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 from pathlib import Path
 
 from futures_market import (
@@ -44,6 +45,39 @@ def load_oi_symbol_cache(period: str, *, ttl_sec: float = _DEFAULT_TTL_SEC) -> l
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
     return None
+
+
+def load_oi_symbol_cache_stale(period: str) -> list[str] | None:
+    """Кэш с диска без проверки TTL — запасной вариант при ошибке сети."""
+    path = _cache_path(period)
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        syms = raw.get("symbols")
+        if isinstance(syms, list) and len(syms) >= 2:
+            return sorted({str(s).upper() for s in syms if s})
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return None
+
+
+_NETWORK_ERRORS = (
+    urllib.error.URLError,
+    urllib.error.HTTPError,
+    TimeoutError,
+    OSError,
+    json.JSONDecodeError,
+    ValueError,
+)
+
+
+def _fallback_symbols(period: str, *, rebuild: bool) -> tuple[list[str], str]:
+    stale = load_oi_symbol_cache_stale(period)
+    if stale:
+        age_h = (oi_cache_age_sec(period) or 0) / 3600.0
+        return stale, f"файл ({age_h:.1f} ч, сеть недоступна)"
+    return [], "ошибка сети"
 
 
 def save_oi_symbol_cache(period: str, symbols: list[str], *, note: str = "") -> None:
@@ -109,11 +143,18 @@ def build_oi_symbol_list(
     3) ликвидные (quoteVolume >= порога) — в список без openInterestHist;
     4) низколиквидные — точечная проверка openInterestHist (не более max_illiquid_verify).
     """
-    all_perp = fetch_usdt_perpetual_symbols()
+    all_perp: list[str]
+    try:
+        all_perp = fetch_usdt_perpetual_symbols()
+    except _NETWORK_ERRORS:
+        return []
     if len(all_perp) < 2:
         return all_perp
 
-    vols = fetch_futures_24hr_quote_volume()
+    try:
+        vols = fetch_futures_24hr_quote_volume()
+    except _NETWORK_ERRORS:
+        return sorted(all_perp[: min(30, len(all_perp))])
     liquid: list[str] = []
     illiquid: list[str] = []
     for sym in all_perp:
@@ -150,8 +191,18 @@ def list_symbols_with_open_interest_fast(
             age_h = (oi_cache_age_sec(period) or 0) / 3600.0
             return cached, f"файл ({age_h:.1f} ч)"
 
-    syms = build_oi_symbol_list(period, max_workers=max_workers)
+    try:
+        syms = build_oi_symbol_list(period, max_workers=max_workers)
+    except _NETWORK_ERRORS:
+        return _fallback_symbols(period, rebuild=rebuild)
+
     if len(syms) >= 2:
         save_oi_symbol_cache(period, syms, note="fast_build")
+        label = "пересборка" if rebuild else "файл устарел → пересборка"
+        return syms, label
+
+    stale, note = _fallback_symbols(period, rebuild=rebuild)
+    if stale:
+        return stale, note
     label = "пересборка" if rebuild else "файл устарел → пересборка"
     return syms, label

@@ -2,7 +2,14 @@
 __pycache__/
 *.py[cod]
 .DS_Store
-data/cache/
+
+# Секреты и локальные данные пользователей
+.streamlit/secrets.toml
 data/users.json
 data/auth.sqlite3
-.streamlit/secrets.toml
+data/main_presets.json
+data/*.csv
+data/cache/
+
+# Примеры и шаблоны можно коммитить
+!data/users.json.example
