@@ -14,11 +14,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
 SECRETS_DIR = ROOT / ".streamlit"
 SECRETS_PATH = SECRETS_DIR / "secrets.toml"
 DATA_DIR = ROOT / "data"
 USERS_FILE = DATA_DIR / "users.json"
-USERS_EXAMPLE = DATA_DIR / "users.json.example"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -33,6 +33,12 @@ def _toml_bool(name: str, default: str = "true") -> str:
 def _toml_string(val: str) -> str:
     escaped = val.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _users_file_path() -> Path:
+    raw = _env("AUTH_USERS_FILE", "data/users.json")
+    p = Path(raw)
+    return p if p.is_absolute() else ROOT / p
 
 
 def _write_secrets() -> None:
@@ -57,7 +63,7 @@ def _write_secrets() -> None:
         f"allow_registration = {_toml_bool('AUTH_ALLOW_REGISTRATION', 'true')}",
         f"allow_guest = {_toml_bool('AUTH_ALLOW_GUEST', 'false')}",
         f"require_email_verification = {_toml_bool('AUTH_REQUIRE_EMAIL_VERIFICATION', 'false')}",
-        'default_user_pages = ["main"]',
+        'default_user_pages = ["main", "williams_scanner"]',
         'guest_pages = ["main"]',
         f"registration_key = {_toml_string(_env('AUTH_REGISTRATION_KEY'))}",
         f"users_file = {_toml_string(users_file)}",
@@ -87,20 +93,101 @@ def _write_secrets() -> None:
 
 
 def _ensure_data_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if USERS_FILE.is_file():
+    users_path = _users_file_path()
+    users_path.parent.mkdir(parents=True, exist_ok=True)
+    if users_path.is_file():
         return
-    if USERS_EXAMPLE.is_file():
-        USERS_FILE.write_text(USERS_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
-        print(f"Initialized {USERS_FILE} from example")
-    else:
-        USERS_FILE.write_text(json.dumps({"users": {}}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(f"Initialized empty {USERS_FILE}")
+    users_path.write_text(
+        json.dumps({"users": {}}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Initialized empty {users_path}")
+
+
+def _count_users() -> int:
+    users_path = _users_file_path()
+    if not users_path.is_file():
+        return 0
+    try:
+        raw = json.loads(users_path.read_text(encoding="utf-8"))
+        users = raw.get("users", {}) if isinstance(raw, dict) else {}
+        return len(users) if isinstance(users, dict) else 0
+    except (OSError, json.JSONDecodeError):
+        return 0
+
+
+def _sanitize_users_file() -> None:
+    """Удаляет пользователей с битым password_hash (старый шаблон users.json.example)."""
+    users_path = _users_file_path()
+    if not users_path.is_file():
+        return
+    try:
+        raw = json.loads(users_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, dict) or not isinstance(raw.get("users"), dict):
+        return
+    users = raw["users"]
+    removed: list[str] = []
+    for name, rec in list(users.items()):
+        if not isinstance(rec, dict):
+            users.pop(name, None)
+            removed.append(str(name))
+            continue
+        stored = str(rec.get("password_hash", ""))
+        if not stored.startswith("pbkdf2_sha256$"):
+            users.pop(name, None)
+            removed.append(str(name))
+    if removed:
+        users_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"Removed invalid users from {users_path}: {', '.join(removed)}")
+
+
+def _bootstrap_admin() -> None:
+    """Создаёт первого админа из AUTH_BOOTSTRAP_USER / AUTH_BOOTSTRAP_PASSWORD."""
+    user = _env("AUTH_BOOTSTRAP_USER")
+    password = _env("AUTH_BOOTSTRAP_PASSWORD")
+    if not user or not password:
+        return
+    if len(password) < 8:
+        print("WARNING: AUTH_BOOTSTRAP_PASSWORD короче 8 символов — пропуск bootstrap", file=sys.stderr)
+        return
+
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+
+    from auth import create_user, user_exists  # noqa: WPS433
+
+    name = user.strip().lower()
+    if user_exists(name):
+        print(f"Bootstrap: пользователь «{name}» уже есть ({_count_users()} всего)")
+        return
+    create_user(name, password, role="admin", email_verified=True)
+    print(f"Bootstrap: создан администратор «{name}»")
+
+
+def _log_storage_status() -> None:
+    users_path = _users_file_path()
+    auth_db = _env("AUTH_DB_FILE", "data/auth.sqlite3")
+    db_path = Path(auth_db) if Path(auth_db).is_absolute() else ROOT / auth_db
+    writable = os.access(users_path.parent, os.W_OK)
+    print(
+        f"Auth storage: users={users_path} (exists={users_path.is_file()}, "
+        f"count={_count_users()}, writable={writable}), db={db_path}"
+    )
+    if not writable:
+        print(
+            "ERROR: каталог data не доступен для записи — подключите Persistent Disk на Render.",
+            file=sys.stderr,
+        )
 
 
 def main() -> None:
     _write_secrets()
     _ensure_data_dir()
+    _sanitize_users_file()
+    _bootstrap_admin()
+    _log_storage_status()
 
 
 if __name__ == "__main__":

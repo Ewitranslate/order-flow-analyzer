@@ -75,9 +75,11 @@ data/                    — users.json, кэш (не коммитится)
 | `AUTH_ALLOW_REGISTRATION` | `true` |
 | `AUTH_USERS_FILE` | `data/users.json` |
 | `AUTH_DB_FILE` | `data/auth.sqlite3` |
+| `AUTH_BOOTSTRAP_USER` | логин первого админа (опционально) |
+| `AUTH_BOOTSTRAP_PASSWORD` | пароль админа, ≥8 символов (опционально) |
 | `PYTHON_VERSION` | `3.11.9` |
 
-При старте `render_write_secrets.py` создаёт `.streamlit/secrets.toml` из этих переменных.
+При старте создаётся пустой `users.json` (не demo-пользователь) и при необходимости — админ из `AUTH_BOOTSTRAP_*`.
 
 5. **Persistent Disk** → mount `data` (1 GB)
 6. **Manual Deploy** → Clear build cache & deploy → жёсткое обновление страницы (Ctrl+Shift+R)
