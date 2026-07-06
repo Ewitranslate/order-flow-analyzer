@@ -64,13 +64,23 @@ data/                    — users.json, кэш (не коммитится)
 ## Деплой (Render)
 
 1. [render.com](https://render.com) → **New Web Service** → репозиторий `Ewitranslate/order-flow-analyzer`
-2. **Start Command:** `bash scripts/render_start.sh` (или используйте `render.yaml` через Blueprint)
+2. **Start Command:** `bash scripts/render_start.sh`
 3. **Health Check Path:** `/_stcore/health`
-4. **Environment:** `AUTH_SECRET_KEY`, `AUTH_ENABLED=true`, `AUTH_ALLOW_REGISTRATION=true`
-5. **Persistent Disk** → mount `data` (1 GB) — иначе пользователи пропадут после редеплоя
-6. После деплоя: жёсткое обновление страницы (Ctrl+Shift+R)
+4. **Environment** (обязательно):
 
-> Если видите сырой HTML/CSS и ошибки `Failed to fetch .../static/js/...` — обновите Start Command и `.streamlit/config.toml` из репозитория, затем **Clear build cache & deploy**.
+| Переменная | Пример |
+|------------|--------|
+| `AUTH_SECRET_KEY` | случайная строка 32+ символов |
+| `AUTH_ENABLED` | `true` |
+| `AUTH_ALLOW_REGISTRATION` | `true` |
+| `AUTH_USERS_FILE` | `data/users.json` |
+| `AUTH_DB_FILE` | `data/auth.sqlite3` |
+| `PYTHON_VERSION` | `3.11.9` |
+
+При старте `render_write_secrets.py` создаёт `.streamlit/secrets.toml` из этих переменных.
+
+5. **Persistent Disk** → mount `data` (1 GB)
+6. **Manual Deploy** → Clear build cache & deploy → жёсткое обновление страницы (Ctrl+Shift+R)
 
 ## Деплой (Streamlit Community Cloud)
 
