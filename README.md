@@ -11,7 +11,7 @@
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/order-flow-analyzer.git
+git clone https://github.com/Ewitranslate/order-flow-analyzer.git
 cd order-flow-analyzer
 
 python3 -m venv .venv
