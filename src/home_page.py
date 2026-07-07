@@ -10,11 +10,11 @@ from auth import (
     _registration_key_expected,
     allow_registration,
     auth_enabled,
+    auth_storage_status,
     count_users,
     enter_application,
     login_user,
     register_user,
-    users_file_path,
 )
 
 _AUTH_FLASH = "home_auth_flash"
@@ -174,12 +174,19 @@ def render_home_landing() -> None:
             _render_auth_flash()
 
             if auth_enabled():
-                n_users = count_users()
-                if n_users == 0:
+                storage = auth_storage_status()
+                n_users = storage["user_count"]
+                if not storage["writable"]:
+                    st.error(
+                        "Хранилище аккаунтов **недоступно для записи**. Регистрация и вход не сохранятся "
+                        "после перезапуска. На Render подключите **Persistent Disk** с mount path "
+                        "`/opt/render/project/src/data`."
+                    )
+                elif n_users == 0:
                     st.info(
-                        "Аккаунтов пока нет. Зарегистрируйтесь на вкладке «Регистрация» "
-                        "или задайте на Render переменные **AUTH_BOOTSTRAP_USER** и "
-                        "**AUTH_BOOTSTRAP_PASSWORD** (≥8 символов) и пересоберите сервис."
+                        "Аккаунтов пока нет — откройте вкладку **«Регистрация»** ниже. "
+                        "Либо задайте на Render **AUTH_BOOTSTRAP_USER** и **AUTH_BOOTSTRAP_PASSWORD** "
+                        "(≥8 символов) и сделайте redeploy."
                     )
                 else:
                     st.caption(f"Зарегистрировано пользователей: **{n_users}**")
@@ -216,8 +223,8 @@ def render_home_landing() -> None:
                         elif result == "not_found":
                             _set_auth_flash(
                                 "error",
-                                "Пользователь не найден. Зарегистрируйтесь или проверьте логин "
-                                f"(файл: `{users_file_path()}`).",
+                                "Пользователь не найден. Откройте вкладку **«Регистрация»** или проверьте логин. "
+                                f"Хранилище: `{storage['auth_db']}` (пользователей: {n_users}).",
                             )
                             st.rerun()
                         else:
@@ -225,9 +232,11 @@ def render_home_landing() -> None:
                             st.rerun()
 
                 with tab_register:
-                    reg_open = allow_registration()
-                    if not reg_open:
+                    reg_open = allow_registration() and storage["writable"]
+                    if not allow_registration():
                         st.caption("Самостоятельная регистрация отключена администратором.")
+                    elif not storage["writable"]:
+                        st.caption("Регистрация временно недоступна: нет записи в каталог data.")
 
                     with st.form("home_register", clear_on_submit=False):
                         ru = st.text_input(

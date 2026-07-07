@@ -105,15 +105,13 @@ def _ensure_data_dir() -> None:
 
 
 def _count_users() -> int:
-    users_path = _users_file_path()
-    if not users_path.is_file():
-        return 0
-    try:
-        raw = json.loads(users_path.read_text(encoding="utf-8"))
-        users = raw.get("users", {}) if isinstance(raw, dict) else {}
-        return len(users) if isinstance(users, dict) else 0
-    except (OSError, json.JSONDecodeError):
-        return 0
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    from auth_store import count_users_store, init_auth_db, migrate_users_from_json
+
+    init_auth_db()
+    migrate_users_from_json(_users_file_path())
+    return count_users_store()
 
 
 def _sanitize_users_file() -> None:
@@ -156,6 +154,11 @@ def _bootstrap_admin() -> None:
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
 
+    from auth_store import init_auth_db, migrate_users_from_json
+
+    init_auth_db()
+    migrate_users_from_json(_users_file_path())
+
     from auth import create_user, set_user_password, set_user_role, user_exists  # noqa: WPS433
 
     name = user.strip().lower()
@@ -172,14 +175,29 @@ def _log_storage_status() -> None:
     users_path = _users_file_path()
     auth_db = _env("AUTH_DB_FILE", "data/auth.sqlite3")
     db_path = Path(auth_db) if Path(auth_db).is_absolute() else ROOT / auth_db
-    writable = os.access(users_path.parent, os.W_OK)
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    from auth_store import auth_storage_writable, count_users_store, init_auth_db, migrate_users_from_json
+
+    init_auth_db()
+    migrated = migrate_users_from_json(users_path)
+    if migrated:
+        print(f"Migrated {migrated} user(s) from {users_path} to SQLite")
+    writable = auth_storage_writable()
+    count = count_users_store()
     print(
         f"Auth storage: users={users_path} (exists={users_path.is_file()}, "
-        f"count={_count_users()}, writable={writable}), db={db_path}"
+        f"sqlite_count={count}, writable={writable}), db={db_path}"
     )
     if not writable:
         print(
             "ERROR: каталог data не доступен для записи — подключите Persistent Disk на Render.",
+            file=sys.stderr,
+        )
+    if count == 0:
+        print(
+            "WARNING: пользователей нет. Зарегистрируйтесь через UI или задайте "
+            "AUTH_BOOTSTRAP_USER и AUTH_BOOTSTRAP_PASSWORD (≥8 символов).",
             file=sys.stderr,
         )
 

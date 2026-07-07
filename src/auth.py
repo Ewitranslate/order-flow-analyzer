@@ -92,8 +92,11 @@ def require_email_verification() -> bool:
 
 def allow_registration() -> bool:
     cfg = _auth_cfg()
-    if "allow_registration" in cfg or os.environ.get("AUTH_ALLOW_REGISTRATION", "").strip():
-        return _truthy(cfg.get("allow_registration") or os.environ.get("AUTH_ALLOW_REGISTRATION"), default=False)
+    env_val = os.environ.get("AUTH_ALLOW_REGISTRATION", "").strip()
+    if env_val:
+        return _truthy(env_val, default=True)
+    if "allow_registration" in cfg:
+        return _truthy(cfg.get("allow_registration"), default=True)
     return True
 
 
@@ -215,22 +218,45 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def _load_users_db() -> dict[str, Any]:
-    path = users_file_path()
-    if not path.is_file():
-        return {"users": {}}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict) and isinstance(raw.get("users"), dict):
-            return raw
-    except (OSError, json.JSONDecodeError):
-        pass
-    return {"users": {}}
+    from auth_store import load_users_store, migrate_users_from_json
+
+    migrate_users_from_json(users_file_path())
+    return load_users_store()
 
 
 def _save_users_db(db: dict[str, Any]) -> None:
-    path = users_file_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+    from auth_store import auth_storage_writable, save_users_store
+
+    if not auth_storage_writable():
+        raise OSError(f"Каталог данных недоступен для записи: {auth_db_path().parent}")
+    save_users_store(db)
+    try:
+        path = users_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def auth_db_path() -> Path:
+    from auth_store import auth_db_path as _path
+
+    return _path()
+
+
+def auth_storage_status() -> dict[str, Any]:
+    from auth_store import auth_storage_writable, count_users_store
+
+    db_path = auth_db_path()
+    users_path = users_file_path()
+    return {
+        "users_file": users_path,
+        "auth_db": db_path,
+        "writable": auth_storage_writable(),
+        "user_count": count_users(),
+        "sqlite_user_count": count_users_store(),
+        "registration_open": allow_registration(),
+    }
 
 
 def user_exists(username: str) -> bool:

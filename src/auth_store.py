@@ -1,7 +1,8 @@
-"""SQLite-хранилище сессий и журнала входов."""
+"""SQLite-хранилище пользователей, сессий и журнала входов."""
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -12,7 +13,7 @@ from typing import Any, Iterator
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DB = _PROJECT_ROOT / "data" / "auth.sqlite3"
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -58,6 +59,19 @@ CREATE TABLE IF NOT EXISTS login_events (
 );
 CREATE INDEX IF NOT EXISTS idx_login_events_username ON login_events(username);
 CREATE INDEX IF NOT EXISTS idx_login_events_time ON login_events(occurred_at);
+
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    role TEXT NOT NULL DEFAULT 'user',
+    email TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 1,
+    pages_json TEXT,
+    created_at TEXT,
+    verification_token TEXT,
+    verification_expires INTEGER
+);
 """
 
 _lock = threading.Lock()
@@ -187,6 +201,155 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """Таблица users (миграция с users.json)."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY COLLATE NOCASE,
+            password_hash TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            role TEXT NOT NULL DEFAULT 'user',
+            email TEXT,
+            email_verified INTEGER NOT NULL DEFAULT 1,
+            pages_json TEXT,
+            created_at TEXT,
+            verification_token TEXT,
+            verification_expires INTEGER
+        );
+        """
+    )
+
+
+def _user_row_to_rec(row: sqlite3.Row) -> dict[str, Any]:
+    pages_json = row["pages_json"]
+    pages: list[str] | None = None
+    if pages_json:
+        try:
+            raw = json.loads(pages_json)
+            if isinstance(raw, list):
+                pages = [str(p) for p in raw]
+        except (TypeError, json.JSONDecodeError):
+            pages = None
+    rec: dict[str, Any] = {
+        "password_hash": str(row["password_hash"]),
+        "active": bool(row["active"]),
+        "role": str(row["role"] or "user"),
+        "email": row["email"],
+        "email_verified": bool(row["email_verified"]),
+        "created_at": row["created_at"] or "",
+    }
+    if pages is not None:
+        rec["pages"] = pages
+    if row["verification_token"]:
+        rec["verification_token"] = row["verification_token"]
+    if row["verification_expires"] is not None:
+        rec["verification_expires"] = int(row["verification_expires"])
+    return rec
+
+
+def _user_rec_to_row(username: str, rec: dict[str, Any]) -> dict[str, Any]:
+    pages = rec.get("pages")
+    pages_json = None
+    if isinstance(pages, (list, tuple)):
+        pages_json = json.dumps([str(p) for p in pages])
+    return {
+        "username": username.strip().lower(),
+        "password_hash": str(rec.get("password_hash", "")),
+        "active": 1 if rec.get("active", True) else 0,
+        "role": str(rec.get("role", "user")),
+        "email": rec.get("email"),
+        "email_verified": 1 if rec.get("email_verified", True) else 0,
+        "pages_json": pages_json,
+        "created_at": rec.get("created_at"),
+        "verification_token": rec.get("verification_token"),
+        "verification_expires": rec.get("verification_expires"),
+    }
+
+
+def load_users_store() -> dict[str, Any]:
+    init_auth_db()
+    with db_conn() as conn:
+        rows = conn.execute("SELECT * FROM users ORDER BY username").fetchall()
+    users: dict[str, Any] = {}
+    for row in rows:
+        users[str(row["username"]).lower()] = _user_row_to_rec(row)
+    return {"users": users}
+
+
+def save_users_store(db: dict[str, Any]) -> None:
+    init_auth_db()
+    users = db.get("users", {})
+    if not isinstance(users, dict):
+        users = {}
+    with db_conn() as conn:
+        conn.execute("DELETE FROM users")
+        for name, rec in users.items():
+            if not isinstance(rec, dict):
+                continue
+            row = _user_rec_to_row(str(name), rec)
+            if not row["password_hash"].startswith("pbkdf2_sha256$"):
+                continue
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, active, role, email, email_verified,
+                    pages_json, created_at, verification_token, verification_expires
+                ) VALUES (
+                    :username, :password_hash, :active, :role, :email, :email_verified,
+                    :pages_json, :created_at, :verification_token, :verification_expires
+                )
+                """,
+                row,
+            )
+
+
+def count_users_store() -> int:
+    init_auth_db()
+    with db_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+    return int(row["c"] or 0) if row else 0
+
+
+def migrate_users_from_json(json_path: Path) -> int:
+    """Импорт users.json в SQLite, если в БД ещё нет пользователей."""
+    init_auth_db()
+    if count_users_store() > 0:
+        return 0
+    if not json_path.is_file():
+        return 0
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(raw, dict) or not isinstance(raw.get("users"), dict):
+        return 0
+    users_in: dict[str, Any] = {}
+    for name, rec in raw["users"].items():
+        if not isinstance(rec, dict):
+            continue
+        stored = str(rec.get("password_hash", ""))
+        if not stored.startswith("pbkdf2_sha256$"):
+            continue
+        users_in[str(name).strip().lower()] = rec
+    if not users_in:
+        return 0
+    save_users_store({"users": users_in})
+    return len(users_in)
+
+
+def auth_storage_writable() -> bool:
+    db_path = auth_db_path()
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        probe = db_path.parent / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def init_auth_db() -> None:
     global _initialized
     with _lock:
@@ -200,6 +363,8 @@ def init_auth_db() -> None:
                 _migrate_to_v2(conn)
             if current < 3:
                 _migrate_to_v3(conn)
+            if current < 4:
+                _migrate_to_v4(conn)
             if current < _SCHEMA_VERSION:
                 from datetime import datetime, timezone
 

@@ -79,7 +79,9 @@ data/                    — users.json, кэш (не коммитится)
 | `AUTH_BOOTSTRAP_PASSWORD` | пароль админа, ≥8 символов (опционально) |
 | `PYTHON_VERSION` | `3.11.9` |
 
-При старте создаётся пустой `users.json` (не demo-пользователь) и при необходимости — админ из `AUTH_BOOTSTRAP_*`.
+При старте создаётся пустое хранилище в `data/auth.sqlite3` (и зеркало `users.json`) и при необходимости — админ из `AUTH_BOOTSTRAP_*`.
+
+**Важно:** без Persistent Disk аккаунты сбрасываются при каждом redeploy. Надёжный вариант — задать `AUTH_BOOTSTRAP_USER` / `AUTH_BOOTSTRAP_PASSWORD` в Environment (пароль сбрасывается при каждом старте, если пользователь уже есть).
 
 5. **Persistent Disk** → mount path **`/opt/render/project/src/data`** (или `data` относительно корня), размер 1 GB
 6. **Первый вход** — один из вариантов:
