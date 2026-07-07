@@ -156,11 +156,13 @@ def _bootstrap_admin() -> None:
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
 
-    from auth import create_user, user_exists  # noqa: WPS433
+    from auth import create_user, set_user_password, set_user_role, user_exists  # noqa: WPS433
 
     name = user.strip().lower()
     if user_exists(name):
-        print(f"Bootstrap: пользователь «{name}» уже есть ({_count_users()} всего)")
+        set_user_password(name, password)
+        set_user_role(name, "admin")
+        print(f"Bootstrap: обновлён пароль администратора «{name}» ({_count_users()} пользователей)")
         return
     create_user(name, password, role="admin", email_verified=True)
     print(f"Bootstrap: создан администратор «{name}»")

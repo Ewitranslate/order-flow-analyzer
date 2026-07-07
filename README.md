@@ -81,8 +81,16 @@ data/                    — users.json, кэш (не коммитится)
 
 При старте создаётся пустой `users.json` (не demo-пользователь) и при необходимости — админ из `AUTH_BOOTSTRAP_*`.
 
-5. **Persistent Disk** → mount `data` (1 GB)
-6. **Manual Deploy** → Clear build cache & deploy → жёсткое обновление страницы (Ctrl+Shift+R)
+5. **Persistent Disk** → mount path **`/opt/render/project/src/data`** (или `data` относительно корня), размер 1 GB
+6. **Первый вход** — один из вариантов:
+   - вкладка **«Регистрация»** на сайте, или
+   - в Environment задать `AUTH_BOOTSTRAP_USER=admin` и `AUTH_BOOTSTRAP_PASSWORD=ваш_пароль_8+` → redeploy
+7. **Manual Deploy** → Clear build cache & deploy
+
+В логах после старта ищите: `Auth storage: users=... count=1` и `Bootstrap: создан администратор`.
+
+> Если пишет «Пользователь не найден» — аккаунтов нет (диск пустой или сброшен).  
+> Если «Неверный пароль» — логин верный, сбросьте пароль через `AUTH_BOOTSTRAP_PASSWORD` и redeploy.
 
 ## Деплой (Streamlit Community Cloud)
 

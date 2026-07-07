@@ -28,7 +28,7 @@ _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 _PBKDF2_ROUNDS = 260_000
 _VERIFY_TTL_SEC = 48 * 3600
 
-LoginResult = Literal["ok", "invalid", "unverified", "inactive"]
+LoginResult = Literal["ok", "invalid", "not_found", "unverified", "inactive"]
 Role = Literal["admin", "user"]
 
 PAGE_MAIN = "main"
@@ -50,20 +50,24 @@ USER_ASSIGNABLE_PAGES: tuple[str, ...] = (PAGE_MAIN, PAGE_WILLIAMS)
 def _auth_cfg() -> dict[str, Any]:
     try:
         raw = st.secrets.get("auth", {})
-        return dict(raw) if isinstance(raw, dict) else {}
+        out: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
     except Exception:
-        pass
-    out: dict[str, Any] = {}
-    if os.environ.get("AUTH_ENABLED", "").strip():
-        out["enabled"] = os.environ.get("AUTH_ENABLED", "")
-    if os.environ.get("AUTH_SECRET_KEY", "").strip():
-        out["secret_key"] = os.environ.get("AUTH_SECRET_KEY", "")
-    if os.environ.get("AUTH_ALLOW_REGISTRATION", "").strip():
-        out["allow_registration"] = os.environ.get("AUTH_ALLOW_REGISTRATION", "")
-    if os.environ.get("AUTH_REGISTRATION_KEY", "").strip():
-        out["registration_key"] = os.environ.get("AUTH_REGISTRATION_KEY", "")
-    if os.environ.get("AUTH_USERS_FILE", "").strip():
-        out["users_file"] = os.environ.get("AUTH_USERS_FILE", "")
+        out = {}
+    # Переменные окружения (Render) имеют приоритет над secrets.toml.
+    env_map = {
+        "AUTH_ENABLED": "enabled",
+        "AUTH_SECRET_KEY": "secret_key",
+        "AUTH_ALLOW_REGISTRATION": "allow_registration",
+        "AUTH_ALLOW_GUEST": "allow_guest",
+        "AUTH_REGISTRATION_KEY": "registration_key",
+        "AUTH_USERS_FILE": "users_file",
+        "AUTH_DB_FILE": "auth_db",
+        "AUTH_REQUIRE_EMAIL_VERIFICATION": "require_email_verification",
+    }
+    for env_name, cfg_key in env_map.items():
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            out[cfg_key] = val
     return out
 
 
@@ -234,6 +238,11 @@ def user_exists(username: str) -> bool:
     return u in _load_users_db().get("users", {})
 
 
+def count_users() -> int:
+    users = _load_users_db().get("users", {})
+    return len(users) if isinstance(users, dict) else 0
+
+
 def get_user_record(username: str | None) -> dict[str, Any] | None:
     if not username:
         return None
@@ -337,6 +346,18 @@ def set_user_role(username: str, role: Role) -> None:
     if name not in users:
         raise ValueError(f"Пользователь «{name}» не найден")
     users[name]["role"] = role
+    _save_users_db(db)
+
+
+def set_user_password(username: str, password: str) -> None:
+    name = username.strip().lower()
+    if len(password) < 8:
+        raise ValueError("Пароль не короче 8 символов")
+    db = _load_users_db()
+    users = db.setdefault("users", {})
+    if name not in users:
+        raise ValueError(f"Пользователь «{name}» не найден")
+    users[name]["password_hash"] = hash_password(password)
     _save_users_db(db)
 
 
@@ -471,7 +492,7 @@ def check_login(username: str, password: str) -> LoginResult:
     name = username.strip().lower()
     rec = _load_users_db().get("users", {}).get(name)
     if not rec:
-        return "invalid"
+        return "not_found"
     if not rec.get("active", True):
         return "inactive"
     stored = str(rec.get("password_hash", ""))
@@ -489,6 +510,7 @@ def authenticate(username: str, password: str) -> bool:
 def _login_failure_reason(result: LoginResult) -> str:
     return {
         "invalid": "invalid_credentials",
+        "not_found": "user_not_found",
         "inactive": "inactive",
         "unverified": "unverified",
     }.get(result, result)

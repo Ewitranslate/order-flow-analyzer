@@ -10,9 +10,11 @@ from auth import (
     _registration_key_expected,
     allow_registration,
     auth_enabled,
+    count_users,
     enter_application,
     login_user,
     register_user,
+    users_file_path,
 )
 
 _AUTH_FLASH = "home_auth_flash"
@@ -172,6 +174,16 @@ def render_home_landing() -> None:
             _render_auth_flash()
 
             if auth_enabled():
+                n_users = count_users()
+                if n_users == 0:
+                    st.info(
+                        "Аккаунтов пока нет. Зарегистрируйтесь на вкладке «Регистрация» "
+                        "или задайте на Render переменные **AUTH_BOOTSTRAP_USER** и "
+                        "**AUTH_BOOTSTRAP_PASSWORD** (≥8 символов) и пересоберите сервис."
+                    )
+                else:
+                    st.caption(f"Зарегистрировано пользователей: **{n_users}**")
+
                 tab_login, tab_register = st.tabs(["Вход", "Регистрация"])
 
                 with tab_login:
@@ -201,8 +213,15 @@ def render_home_landing() -> None:
                         elif result == "inactive":
                             _set_auth_flash("error", "Аккаунт заблокирован администратором.")
                             st.rerun()
+                        elif result == "not_found":
+                            _set_auth_flash(
+                                "error",
+                                "Пользователь не найден. Зарегистрируйтесь или проверьте логин "
+                                f"(файл: `{users_file_path()}`).",
+                            )
+                            st.rerun()
                         else:
-                            _set_auth_flash("error", "Неверный логин или пароль.")
+                            _set_auth_flash("error", "Неверный пароль.")
                             st.rerun()
 
                 with tab_register:
