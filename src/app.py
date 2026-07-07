@@ -41,7 +41,12 @@ from plotly.subplots import make_subplots
 
 from auth import render_auth_gate, render_auth_sidebar, require_page_access, PAGE_MAIN
 from main_settings_presets import apply_pending_preset_before_widgets, render_main_presets_sidebar
-from binance_http import FAPI_BASE, fetch_spot_exchange_info, fetch_spot_klines, http_get_json, last_binance_error
+from binance_http import (
+    fetch_spot_exchange_info,
+    fetch_spot_klines,
+    fetch_futures_open_interest_hist as _fetch_futures_oi_hist_raw,
+    last_binance_error,
+)
 from futures_market import fetch_futures_klines
 from atr_indicator import add_atr_panel
 from price_compression import (
@@ -155,14 +160,20 @@ def cached_spot_usdt_symbol_list(reload_token: int = 0) -> list[str]:
 @st.cache_data(ttl=6 * 3600, show_spinner="Список пар с OI…")
 def cached_usdtm_symbols_with_oi(period: str, rebuild_token: int = 0) -> tuple[str, ...]:
     """USDT-M perpetual с OI: файл на диске + быстрая пересборка (топ по объёму)."""
+    from oi_symbol_cache import _FALLBACK_OI_SYMBOLS, list_symbols_with_open_interest_fast, load_oi_symbol_cache_stale
+
     try:
         syms, _src = list_symbols_with_open_interest_fast(
             period, rebuild=bool(rebuild_token), max_workers=14
         )
-        return tuple(syms)
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
-        stale = load_oi_symbol_cache_stale(period)
-        return tuple(stale) if stale else tuple()
+        if len(syms) >= 2:
+            return tuple(syms)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        pass
+    stale = load_oi_symbol_cache_stale(period)
+    if stale:
+        return tuple(stale)
+    return tuple(_FALLBACK_OI_SYMBOLS)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -243,17 +254,11 @@ def overlay_cum_delta_on_chart(df_chart: pd.DataFrame, df_cum: pd.DataFrame) -> 
 
 def fetch_futures_open_interest_hist(symbol: str, period: str, limit: int = 500) -> pd.DataFrame:
     """USDT-M futures: история open interest (`/futures/data/openInterestHist`)."""
-    sym = symbol.upper().replace("/", "")
-    lim = max(5, min(500, int(limit)))
-    q = urllib.parse.urlencode({"symbol": sym, "period": period, "limit": str(lim)})
-    url = f"{FAPI_BASE}/futures/data/openInterestHist?{q}"
-    raw = http_get_json(url, timeout=25.0)
-    if not isinstance(raw, list) or not raw:
+    raw = _fetch_futures_oi_hist_raw(symbol, period, limit)
+    if not raw:
         return pd.DataFrame()
     rows = []
     for row in raw:
-        if not isinstance(row, dict):
-            continue
         try:
             ts = int(row["timestamp"])
             oi = float(row.get("sumOpenInterest", 0) or 0)
@@ -1541,9 +1546,15 @@ def main() -> None:
             )
             if not oi_syms:
                 st.warning(
-                    "Не удалось получить список пар с OI (сеть или Binance). "
+                    "Не удалось получить список пар с OI (сеть или Binance fapi). "
                     "Используется полный список spot USDT для выбора пар."
                 )
+                err = last_binance_error()
+                if err:
+                    st.caption(
+                        f"Binance fapi: `{err}`. Для Open Interest на Render часто нужен "
+                        "`BINANCE_HTTP_PROXY` или `HTTPS_PROXY` в Environment."
+                    )
             if "cb_restrict_to_oi" not in st.session_state:
                 st.session_state["cb_restrict_to_oi"] = bool(oi_syms)
             restrict_to_oi = st.checkbox(

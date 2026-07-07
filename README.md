@@ -104,6 +104,8 @@ data/                    — users.json, кэш (не коммитится)
 | `HTTPS_PROXY` / `HTTP_PROXY` | альтернатива, если прокси уже настроен в окружении |
 | `BINANCE_FAPI_BASE` | другой URL USDT-M futures (по умолчанию `https://fapi.binance.com`) |
 
+Open Interest идёт через **fapi** (`fapi.binance.com`), не через `data-api.binance.vision`. Если список OI пустой или панель OI без данных — задайте `BINANCE_HTTP_PROXY` / `HTTPS_PROXY`.
+
 Если график пустой и внизу видно `Binance API: ...` — задайте прокси и сделайте **Clear build cache & deploy**.
 
 ## Деплой (Streamlit Community Cloud)

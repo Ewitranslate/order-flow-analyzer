@@ -20,7 +20,36 @@ SPOT_API_BASES: tuple[str, ...] = (
     "https://api3.binance.com",
 )
 
-FAPI_BASE = os.environ.get("BINANCE_FAPI_BASE", "https://fapi.binance.com").rstrip("/")
+FAPI_BASES_DEFAULT: tuple[str, ...] = (
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+)
+
+
+def fapi_bases() -> tuple[str, ...]:
+    custom = os.environ.get("BINANCE_FAPI_BASE", "").strip().rstrip("/")
+    if custom:
+        return (custom,) + tuple(b for b in FAPI_BASES_DEFAULT if b != custom)
+    return FAPI_BASES_DEFAULT
+
+
+FAPI_BASE = fapi_bases()[0]
+
+_DEFAULT_FAPI_BASES: tuple[str, ...] = (
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+)
+
+
+def fapi_bases() -> tuple[str, ...]:
+    custom = os.environ.get("BINANCE_FAPI_BASE", "").strip().rstrip("/")
+    if custom:
+        return (custom,) + tuple(b for b in _DEFAULT_FAPI_BASES if b != custom)
+    return _DEFAULT_FAPI_BASES
 
 _USER_AGENT = "orderflow-analyzer/1"
 _LAST_ERROR: str = ""
@@ -154,21 +183,65 @@ def fetch_spot_24h_quote_volume() -> dict[str, float]:
     raise urllib.error.URLError(msg)
 
 
+def fapi_get_json(path: str, *, timeout: float = 30.0) -> Any:
+    """GET к USDT-M futures API с перебором зеркал fapi*."""
+    rel = path if path.startswith("/") else f"/{path}"
+    errors: list[str] = []
+    for base in fapi_bases():
+        url = f"{base.rstrip('/')}{rel}"
+        try:
+            raw = http_get_json(url, timeout=timeout)
+            _set_error("")
+            return raw
+        except urllib.error.HTTPError as exc:
+            errors.append(f"{base}: HTTP {exc.code}")
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            errors.append(f"{base}: {exc}")
+    msg = "; ".join(errors[:4]) if errors else "все fapi-эндпоинты недоступны"
+    _set_error(msg)
+    raise urllib.error.URLError(msg)
+
+
 def fetch_futures_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
     sym = symbol.upper().replace("/", "")
     lim = max(10, min(1500, int(limit)))
     q = urllib.parse.urlencode({"symbol": sym, "interval": interval, "limit": str(lim)})
-    url = f"{FAPI_BASE}/fapi/v1/klines?{q}"
-    try:
-        raw = http_get_json(url, timeout=30.0)
-        if not isinstance(raw, list) or not raw:
-            raise ValueError("пустой ответ fapi klines")
-        df = _parse_klines_rows(raw)
-        _set_error("")
-        return df
-    except urllib.error.HTTPError as exc:
-        _set_error(f"fapi: HTTP {exc.code}")
-        raise
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-        _set_error(f"fapi: {exc}")
-        raise
+    raw = fapi_get_json(f"/fapi/v1/klines?{q}", timeout=30.0)
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("пустой ответ fapi klines")
+    return _parse_klines_rows(raw)
+
+
+def fetch_futures_exchange_info() -> dict[str, Any]:
+    raw = fapi_get_json("/fapi/v1/exchangeInfo", timeout=35.0)
+    if not isinstance(raw, dict):
+        raise ValueError("неверный JSON fapi exchangeInfo")
+    return raw
+
+
+def fetch_futures_24hr_quote_volume() -> dict[str, float]:
+    raw = fapi_get_json("/fapi/v1/ticker/24hr", timeout=35.0)
+    out: dict[str, float] = {}
+    if not isinstance(raw, list):
+        return out
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol", "")).upper()
+        if not sym.endswith("USDT"):
+            continue
+        try:
+            out[sym] = float(row.get("quoteVolume", 0) or 0)
+        except (TypeError, ValueError):
+            out[sym] = 0.0
+    return out
+
+
+def fetch_futures_open_interest_hist(symbol: str, period: str, limit: int = 500) -> list[dict[str, Any]]:
+    sym = symbol.upper().replace("/", "")
+    lim = max(5, min(500, int(limit)))
+    q = urllib.parse.urlencode({"symbol": sym, "period": period, "limit": str(lim)})
+    raw = fapi_get_json(f"/futures/data/openInterestHist?{q}", timeout=28.0)
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, dict)]

@@ -24,6 +24,44 @@ _DEFAULT_TTL_SEC = 6 * 3600
 _MIN_QUOTE_VOL_USDT = 50_000.0
 _MAX_ILLIQUID_OI_VERIFY = 80
 
+# Запасной список ликвидных USDT-M perpetual (если fapi недоступен с Render).
+_FALLBACK_OI_SYMBOLS: tuple[str, ...] = (
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "DOTUSDT",
+    "MATICUSDT",
+    "LTCUSDT",
+    "BCHUSDT",
+    "TRXUSDT",
+    "ATOMUSDT",
+    "NEARUSDT",
+    "APTUSDT",
+    "ARBUSDT",
+    "OPUSDT",
+    "SUIUSDT",
+    "FILUSDT",
+    "INJUSDT",
+    "UNIUSDT",
+    "ETCUSDT",
+    "XLMUSDT",
+    "ICPUSDT",
+    "AAVEUSDT",
+    "RUNEUSDT",
+    "TIAUSDT",
+    "SEIUSDT",
+    "WIFUSDT",
+    "PEPEUSDT",
+    "1000SHIBUSDT",
+    "1000BONKUSDT",
+)
+
 
 def _cache_path(period: str) -> Path:
     safe = "".join(c if c.isalnum() else "_" for c in period.strip().lower())
@@ -77,7 +115,7 @@ def _fallback_symbols(period: str, *, rebuild: bool) -> tuple[list[str], str]:
     if stale:
         age_h = (oi_cache_age_sec(period) or 0) / 3600.0
         return stale, f"файл ({age_h:.1f} ч, сеть недоступна)"
-    return [], "ошибка сети"
+    return list(_FALLBACK_OI_SYMBOLS), "запасной список (fapi недоступен)"
 
 
 def save_oi_symbol_cache(period: str, symbols: list[str], *, note: str = "") -> None:
@@ -147,9 +185,9 @@ def build_oi_symbol_list(
     try:
         all_perp = fetch_usdt_perpetual_symbols()
     except _NETWORK_ERRORS:
-        return []
+        return list(_FALLBACK_OI_SYMBOLS)
     if len(all_perp) < 2:
-        return all_perp
+        return list(_FALLBACK_OI_SYMBOLS) if not all_perp else all_perp
 
     try:
         vols = fetch_futures_24hr_quote_volume()
