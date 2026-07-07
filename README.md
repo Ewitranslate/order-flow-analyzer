@@ -75,8 +75,8 @@ data/                    — users.json, кэш (не коммитится)
 | `AUTH_ALLOW_REGISTRATION` | `true` |
 | `AUTH_USERS_FILE` | `data/users.json` |
 | `AUTH_DB_FILE` | `data/auth.sqlite3` |
-| `AUTH_BOOTSTRAP_USER` | логин первого админа (опционально) |
-| `AUTH_BOOTSTRAP_PASSWORD` | пароль админа, ≥8 символов (опционально) |
+| `AUTH_BOOTSTRAP_USER` | `ewitranslate` (логин админа, создаётся/обновляется при старте) |
+| `AUTH_BOOTSTRAP_PASSWORD` | пароль админа, ≥8 символов — **только в Render Environment**, не в git |
 | `PYTHON_VERSION` | `3.11.9` |
 
 При старте создаётся пустое хранилище в `data/auth.sqlite3` (и зеркало `users.json`) и при необходимости — админ из `AUTH_BOOTSTRAP_*`.

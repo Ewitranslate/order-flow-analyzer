@@ -19,11 +19,10 @@ services:
         value: data/auth.sqlite3
       - key: AUTH_SECRET_KEY
         generateValue: true
-      # Раскомментируйте и задайте пароль ≥8 символов для первого входа:
-      # - key: AUTH_BOOTSTRAP_USER
-      #   value: admin
-      # - key: AUTH_BOOTSTRAP_PASSWORD
-      #   sync: false
+      - key: AUTH_BOOTSTRAP_USER
+        value: ewitranslate
+      - key: AUTH_BOOTSTRAP_PASSWORD
+        sync: false
     disk:
       name: order-flow-data
       mountPath: /opt/render/project/src/data
