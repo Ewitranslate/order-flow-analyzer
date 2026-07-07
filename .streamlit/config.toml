@@ -8,7 +8,8 @@ maxUploadSize = 200
 
 [browser]
 gatherUsageStats = false
-serverAddress = "0.0.0.0"
+# Локально открывайте http://localhost:8501
+# На Render адрес 0.0.0.0 задаётся в scripts/render_start.sh (--server.address)
 
 [client]
 toolbarMode = "minimal"

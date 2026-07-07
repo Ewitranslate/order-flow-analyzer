@@ -92,6 +92,18 @@ data/                    — users.json, кэш (не коммитится)
 > Если пишет «Пользователь не найден» — аккаунтов нет (диск пустой или сброшен).  
 > Если «Неверный пароль» — логин верный, сбросьте пароль через `AUTH_BOOTSTRAP_PASSWORD` и redeploy.
 
+### Binance API на Render
+
+Серверы Render иногда **не могут достучаться** до `api.binance.com` (geo-block / 451). Приложение автоматически пробует зеркала, в т.ч. `data-api.binance.vision`.
+
+| Переменная | Когда нужна |
+|------------|-------------|
+| `BINANCE_HTTP_PROXY` | HTTP(S)-прокси для всех запросов к Binance |
+| `HTTPS_PROXY` / `HTTP_PROXY` | альтернатива, если прокси уже настроен в окружении |
+| `BINANCE_FAPI_BASE` | другой URL USDT-M futures (по умолчанию `https://fapi.binance.com`) |
+
+Если график пустой и внизу видно `Binance API: ...` — задайте прокси и сделайте **Clear build cache & deploy**.
+
 ## Деплой (Streamlit Community Cloud)
 
 1. Запушьте репозиторий на **публичный** GitHub

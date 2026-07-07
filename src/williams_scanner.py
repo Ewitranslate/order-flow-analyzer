@@ -23,6 +23,7 @@ import pandas as pd
 
 from app import PriceCumDeltaDivergence, detect_price_vs_cum_divergences, fetch_futures_open_interest_hist
 from atr_indicator import average_true_range
+from binance_http import fetch_spot_24h_quote_volume, fetch_spot_exchange_info, fetch_spot_klines
 from compression_types import recommended_compression_params
 from price_compression import CompressionParams, compression_zone_for_scanner, default_compression_params_for_tf
 from williams_r import williams_percent_r
@@ -358,32 +359,6 @@ class WilliamsHit:
     compression_formation_bars: int = 0
 
 
-def fetch_spot_klines(symbol: str, interval: str, limit: int = 120) -> pd.DataFrame:
-    sym = symbol.upper().replace("/", "")
-    lim = max(20, min(1000, int(limit)))
-    q = urllib.parse.urlencode({"symbol": sym, "interval": interval, "limit": str(lim)})
-    url = f"https://api.binance.com/api/v3/klines?{q}"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-williams-scan/1"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = json.loads(resp.read().decode())
-    rows = []
-    for k in raw:
-        vol = float(k[5])
-        taker_buy = float(k[9]) if len(k) > 9 else 0.0
-        rows.append(
-            {
-                "open_time": int(k[0]),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume_base": vol,
-                "taker_buy_base": taker_buy,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def klines_with_proxy_delta(klines: pd.DataFrame) -> pd.DataFrame:
     """δ = 2×taker_buy − volume; кумулятив — как на главном графике."""
     out = klines.copy()
@@ -642,10 +617,7 @@ def passes_atr_24h_filter(
 
 
 def fetch_spot_usdt_symbols() -> list[str]:
-    url = "https://api.binance.com/api/v3/exchangeInfo"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-williams-scan/1"})
-    with urllib.request.urlopen(req, timeout=35) as resp:
-        data = json.loads(resp.read().decode())
+    data = fetch_spot_exchange_info()
     out: list[str] = []
     for s in data.get("symbols", []):
         if s.get("status") != "TRADING":
@@ -656,28 +628,6 @@ def fetch_spot_usdt_symbols() -> list[str]:
         if sym:
             out.append(sym)
     return sorted(set(out))
-
-
-def fetch_spot_24h_quote_volume() -> dict[str, float]:
-    """Один запрос: quoteVolume USDT spot 24h."""
-    url = "https://api.binance.com/api/v3/ticker/24hr"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-williams-scan/1"})
-    with urllib.request.urlopen(req, timeout=35) as resp:
-        raw = json.loads(resp.read().decode())
-    out: dict[str, float] = {}
-    if not isinstance(raw, list):
-        return out
-    for row in raw:
-        if not isinstance(row, dict):
-            continue
-        sym = str(row.get("symbol", "")).upper()
-        if not sym.endswith("USDT"):
-            continue
-        try:
-            out[sym] = float(row.get("quoteVolume", 0) or 0)
-        except (TypeError, ValueError):
-            out[sym] = 0.0
-    return out
 
 
 def klines_limit_for_williams(

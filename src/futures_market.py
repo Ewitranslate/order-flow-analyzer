@@ -10,15 +10,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
+from binance_http import FAPI_BASE, fetch_futures_klines as _fetch_futures_klines_impl, http_get_json
 
-FAPI_BASE = "https://fapi.binance.com"
+
+def fetch_futures_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
+    return _fetch_futures_klines_impl(symbol, interval, limit)
 
 
 def fetch_usdt_perpetual_symbols() -> list[str]:
     url = f"{FAPI_BASE}/fapi/v1/exchangeInfo"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-reversal/1"})
-    with urllib.request.urlopen(req, timeout=35) as resp:
-        data = json.loads(resp.read().decode())
+    data = http_get_json(url, timeout=35.0)
     out: list[str] = []
     for s in data.get("symbols", []):
         if str(s.get("contractType", "")).upper() != "PERPETUAL":
@@ -33,39 +34,10 @@ def fetch_usdt_perpetual_symbols() -> list[str]:
     return sorted(set(out))
 
 
-def fetch_futures_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    """`GET /fapi/v1/klines` — те же поля, что spot klines."""
-    sym = symbol.upper().replace("/", "")
-    lim = max(10, min(1500, int(limit)))
-    q = urllib.parse.urlencode({"symbol": sym, "interval": interval, "limit": str(lim)})
-    url = f"{FAPI_BASE}/fapi/v1/klines?{q}"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-reversal/1"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = json.loads(resp.read().decode())
-    rows = []
-    for k in raw:
-        vol = float(k[5])
-        taker_buy = float(k[9]) if len(k) > 9 else 0.0
-        rows.append(
-            {
-                "open_time": int(k[0]),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume_base": vol,
-                "taker_buy_base": taker_buy,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def fetch_futures_24hr_quote_volume() -> dict[str, float]:
     """`GET /fapi/v1/ticker/24hr` — quoteVolume по символу (один запрос на все пары)."""
     url = f"{FAPI_BASE}/fapi/v1/ticker/24hr"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-reversal/1"})
-    with urllib.request.urlopen(req, timeout=35) as resp:
-        raw = json.loads(resp.read().decode())
+    raw = http_get_json(url, timeout=35.0)
     out: dict[str, float] = {}
     if not isinstance(raw, list):
         return out
@@ -88,9 +60,7 @@ def fetch_open_interest_hist(symbol: str, period: str, limit: int = 5) -> pd.Dat
     lim = max(5, min(500, int(limit)))
     q = urllib.parse.urlencode({"symbol": sym, "period": period, "limit": str(lim)})
     url = f"{FAPI_BASE}/futures/data/openInterestHist?{q}"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-reversal/1"})
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        raw = json.loads(resp.read().decode())
+    raw = http_get_json(url, timeout=12.0)
     if not isinstance(raw, list) or not raw:
         return pd.DataFrame()
     rows = []

@@ -41,6 +41,7 @@ from plotly.subplots import make_subplots
 
 from auth import render_auth_gate, render_auth_sidebar, require_page_access, PAGE_MAIN
 from main_settings_presets import apply_pending_preset_before_widgets, render_main_presets_sidebar
+from binance_http import FAPI_BASE, fetch_spot_exchange_info, fetch_spot_klines, http_get_json, last_binance_error
 from futures_market import fetch_futures_klines
 from atr_indicator import add_atr_panel
 from price_compression import (
@@ -105,34 +106,12 @@ def _norm_sym(s: str) -> str:
 # ── REST klines ───────────────────────────────────────────────────────────────
 
 
-def fetch_binance_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    sym = symbol.upper().replace("/", "")
-    q = urllib.parse.urlencode({"symbol": sym, "interval": interval, "limit": str(int(limit))})
-    url = f"https://api.binance.com/api/v3/klines?{q}"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-analyzer/1"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = json.loads(resp.read().decode())
-    rows = []
-    for k in raw:
-        vol = float(k[5])
-        taker_buy = float(k[9]) if len(k) > 9 else 0.0
-        rows.append(
-            {
-                "open_time": int(k[0]),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume_base": vol,
-                "taker_buy_base": taker_buy,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 @st.cache_data(ttl=60, show_spinner=False)
 def cached_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
-    return fetch_binance_klines(symbol, interval, limit)
+    try:
+        return fetch_spot_klines(symbol, interval, limit)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        return pd.DataFrame()
 
 
 _FALLBACK_PAIRS_USDT = [
@@ -147,10 +126,7 @@ _FALLBACK_PAIRS_USDT = [
 
 
 def fetch_spot_usdt_symbol_list() -> list[str]:
-    url = "https://api.binance.com/api/v3/exchangeInfo"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-analyzer/1"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode())
+    data = fetch_spot_exchange_info()
     out: list[str] = []
     for s in data.get("symbols", []):
         if s.get("status") != "TRADING":
@@ -270,10 +246,8 @@ def fetch_futures_open_interest_hist(symbol: str, period: str, limit: int = 500)
     sym = symbol.upper().replace("/", "")
     lim = max(5, min(500, int(limit)))
     q = urllib.parse.urlencode({"symbol": sym, "period": period, "limit": str(lim)})
-    url = f"https://fapi.binance.com/futures/data/openInterestHist?{q}"
-    req = urllib.request.Request(url, headers={"User-Agent": "orderflow-analyzer/1"})
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        raw = json.loads(resp.read().decode())
+    url = f"{FAPI_BASE}/futures/data/openInterestHist?{q}"
+    raw = http_get_json(url, timeout=25.0)
     if not isinstance(raw, list) or not raw:
         return pd.DataFrame()
     rows = []
@@ -1334,6 +1308,12 @@ def render_dashboard(
         c5.metric("OI (USDT-M)", "—")
         c6.metric("Баров (график)", "0")
         st.warning(f"Не удалось загрузить свечи для **{c_h}**. Выберите другую пару графика.")
+        err = last_binance_error()
+        if err:
+            st.caption(
+                f"Binance API: `{err}`. На Render часто нужен прокси — задайте "
+                "`BINANCE_HTTP_PROXY` или `HTTPS_PROXY` в Environment."
+            )
         fig = build_figure_bars(
             pd.DataFrame(),
             chart_pair=chart_pair,
