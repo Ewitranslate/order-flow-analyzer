@@ -1577,30 +1577,33 @@ def main() -> None:
             )
             pair_universe = oi_syms if (restrict_to_oi and oi_syms) else symbols
 
-            with st.expander(
-                f"Все пары с OI для **{TF_TITLES_RU.get(tf_key, tf_key)}** (`{period_oi}`) — **{len(oi_syms)}**",
-                expanded=False,
-            ):
-                if not oi_syms:
-                    st.caption("Список пуст — проверьте соединение или попробуйте позже.")
-                else:
-                    oi_needle = st.text_input(
-                        "Поиск по тикеру",
-                        value="",
-                        key="oi_main_list_filt",
-                        placeholder="BTC, 1000…",
-                    )
-                    oi_show = _filter_symbols(oi_syms, oi_needle)
-                    cap_n = 800
-                    if len(oi_show) > cap_n:
-                        st.caption(f"Показаны **{cap_n}** из **{len(oi_show)}** — уточните поиск.")
-                        oi_show = oi_show[:cap_n]
-                    st.dataframe(
-                        pd.DataFrame({"Символ": oi_show}),
-                        use_container_width=True,
-                        height=min(420, 48 + 28 * min(len(oi_show), 24)),
-                        hide_index=True,
-                    )
+            show_oi_table = st.checkbox(
+                f"Показать все пары с OI для {TF_TITLES_RU.get(tf_key, tf_key)} ({period_oi}) — {len(oi_syms)}",
+                value=False,
+                key="cb_show_oi_symbol_table",
+            )
+            if show_oi_table:
+                with st.container(border=True):
+                    if not oi_syms:
+                        st.caption("Список пуст — проверьте соединение или попробуйте позже.")
+                    else:
+                        oi_needle = st.text_input(
+                            "Поиск по тикеру",
+                            value="",
+                            key="oi_main_list_filt",
+                            placeholder="BTC, 1000…",
+                        )
+                        oi_show = _filter_symbols(oi_syms, oi_needle)
+                        cap_n = 800
+                        if len(oi_show) > cap_n:
+                            st.caption(f"Показаны **{cap_n}** из **{len(oi_show)}** — уточните поиск.")
+                            oi_show = oi_show[:cap_n]
+                        st.dataframe(
+                            pd.DataFrame({"Символ": oi_show}),
+                            use_container_width=True,
+                            height=min(420, 48 + 28 * min(len(oi_show), 24)),
+                            hide_index=True,
+                        )
 
             st.markdown("**Свечной график (OHLC)**")
             filt_chart = st.text_input(
@@ -1830,81 +1833,87 @@ def main() -> None:
                 f"Для **{TF_TITLES_RU.get(tf_key, tf_key)}**: Pivot L/R = "
                 f"**{pc_tf_hint.pivot_left}** / **{pc_tf_hint.pivot_right}**"
             )
-            with st.expander("Параметры Price Compression", expanded=bool(show_compression)):
-                if st.button(
-                    "Рекомендуемые параметры",
-                    key="btn_pc_recommended",
-                    use_container_width=True,
-                    help="Сброс к рекомендуемым: pivot 3, касания 3, ratio 0.65, slope 0.08, окно 120, Score 75.",
-                ):
-                    apply_recommended_compression_session_state(
-                        st.session_state,
-                        "sl_pc",
-                        pivot_left=pc_tf_hint.pivot_left,
-                        pivot_right=pc_tf_hint.pivot_right,
+            show_pc_params = show_compression and st.checkbox(
+                "Показать параметры Price Compression",
+                value=bool(show_compression),
+                key="cb_show_pc_params",
+            )
+            if show_pc_params:
+                with st.container(border=True):
+                    if st.button(
+                        "Рекомендуемые параметры",
+                        key="btn_pc_recommended",
+                        use_container_width=True,
+                        help="Сброс к рекомендуемым: pivot 3, касания 3, ratio 0.65, slope 0.08, окно 120, Score 75.",
+                    ):
+                        apply_recommended_compression_session_state(
+                            st.session_state,
+                            "sl_pc",
+                            pivot_left=pc_tf_hint.pivot_left,
+                            pivot_right=pc_tf_hint.pivot_right,
+                        )
+                        st.rerun()
+                    st.slider("Pivot Left", 2, 12, key="sl_pc_pivot_left")
+                    st.slider("Pivot Right", 2, 12, key="sl_pc_pivot_right")
+                    st.slider(
+                        "Мин. Pivot на границу",
+                        2,
+                        8,
+                        key="sl_pc_min_pivots",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["min_pivots"],
                     )
-                    st.rerun()
-                st.slider("Pivot Left", 2, 12, key="sl_pc_pivot_left")
-                st.slider("Pivot Right", 2, 12, key="sl_pc_pivot_right")
-                st.slider(
-                    "Мин. Pivot на границу",
-                    2,
-                    8,
-                    key="sl_pc_min_pivots",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_pivots"],
-                )
-                st.slider(
-                    "Мин. касаний (верх и низ)",
-                    2,
-                    8,
-                    key="sl_pc_min_touches",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_touches"],
-                )
-                st.slider(
-                    "Период сравнения ширины (баров)",
-                    8,
-                    60,
-                    key="sl_pc_lookback",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["lookback_bars"],
-                )
-                st.slider(
-                    "Макс. коэффициент сжатия (Current/Previous)",
-                    min_value=0.40,
-                    max_value=0.95,
-                    step=0.01,
-                    key="sl_pc_max_ratio",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["max_compression_ratio"],
-                )
-                st.slider(
-                    "Макс. наклон середины (%/бар)",
-                    min_value=0.06,
-                    max_value=0.15,
-                    step=0.01,
-                    key="sl_pc_max_slope",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["max_mid_slope_pct_per_bar"],
-                )
-                st.slider(
-                    "Допуск касания (% ширины)",
-                    min_value=0.04,
-                    max_value=0.25,
-                    step=0.01,
-                    key="sl_pc_touch_tol",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["touch_tolerance"],
-                )
-                st.slider(
-                    "Окно анализа (баров)",
-                    60,
-                    300,
-                    key="sl_pc_analysis",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["analysis_bars"],
-                )
-                st.slider(
-                    "Мин. Compression Score",
-                    30,
-                    90,
-                    key="sl_pc_min_score",
-                    help=RECOMMENDED_COMPRESSION_HELP_RU["min_score"],
-                )
+                    st.slider(
+                        "Мин. касаний (верх и низ)",
+                        2,
+                        8,
+                        key="sl_pc_min_touches",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["min_touches"],
+                    )
+                    st.slider(
+                        "Период сравнения ширины (баров)",
+                        8,
+                        60,
+                        key="sl_pc_lookback",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["lookback_bars"],
+                    )
+                    st.slider(
+                        "Макс. коэффициент сжатия (Current/Previous)",
+                        min_value=0.40,
+                        max_value=0.95,
+                        step=0.01,
+                        key="sl_pc_max_ratio",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["max_compression_ratio"],
+                    )
+                    st.slider(
+                        "Макс. наклон середины (%/бар)",
+                        min_value=0.06,
+                        max_value=0.15,
+                        step=0.01,
+                        key="sl_pc_max_slope",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["max_mid_slope_pct_per_bar"],
+                    )
+                    st.slider(
+                        "Допуск касания (% ширины)",
+                        min_value=0.04,
+                        max_value=0.25,
+                        step=0.01,
+                        key="sl_pc_touch_tol",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["touch_tolerance"],
+                    )
+                    st.slider(
+                        "Окно анализа (баров)",
+                        60,
+                        300,
+                        key="sl_pc_analysis",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["analysis_bars"],
+                    )
+                    st.slider(
+                        "Мин. Compression Score",
+                        30,
+                        90,
+                        key="sl_pc_min_score",
+                        help=RECOMMENDED_COMPRESSION_HELP_RU["min_score"],
+                    )
 
             compression_params = compression_params_from_session(st.session_state, "sl_pc")
 
