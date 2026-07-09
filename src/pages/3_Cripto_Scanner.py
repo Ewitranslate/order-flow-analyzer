@@ -48,6 +48,12 @@ from price_compression import (
     default_compression_params_for_tf,
     init_compression_session_state,
 )
+from runtime_profile import (
+    low_memory_mode,
+    scanner_default_top_n,
+    scanner_default_workers,
+    scanner_pair_cap_max,
+)
 from williams_scanner import (
     ATR_24H_INTERVAL,
     ATR_24H_LABEL_RU,
@@ -77,7 +83,7 @@ from williams_scanner import (
     sort_scanner_results_by_age,
 )
 
-SCAN_PAIR_CAP_MAX = 800
+SCAN_PAIR_CAP_MAX = scanner_pair_cap_max()
 TELEGRAM_AUTO_SCAN_INTERVAL = timedelta(minutes=30)
 
 
@@ -85,7 +91,7 @@ def _load_spot_symbol_universe() -> tuple[list[str], bool]:
     """Список USDT spot; is_fallback=True если загружен только запасной список (~7 пар)."""
     syms = list(cached_spot_usdt_symbol_list())
     is_fb = len(syms) <= len(_FALLBACK_PAIRS_USDT) and set(syms) <= set(_FALLBACK_PAIRS_USDT)
-    if is_fb and not st.session_state.get("spot_sym_auto_retry"):
+    if is_fb and not st.session_state.get("spot_sym_auto_retry") and not low_memory_mode():
         cached_spot_usdt_symbol_list.clear()
         st.session_state["spot_sym_auto_retry"] = True
         syms = list(cached_spot_usdt_symbol_list())
@@ -104,7 +110,7 @@ def _rank_symbols_by_volume(symbols: list[str], vol_map: dict[str, float]) -> li
     return sorted(symbols, key=lambda s: float(vol_map.get(s.upper(), 0.0)), reverse=True)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False, max_entries=4 if low_memory_mode() else 32)
 def _cached_spot_volumes() -> dict[str, float]:
     try:
         return fetch_spot_24h_quote_volume()
@@ -1087,7 +1093,7 @@ def main() -> None:
                 )
 
         use_closed = st.checkbox("Последняя **закрытая** свеча", value=True)
-        max_workers = st.slider("Потоков загрузки", 4, 20, 12)
+        max_workers = st.slider("Потоков загрузки", 2, 20, scanner_default_workers())
 
         st.markdown("---")
         all_syms, is_fallback = _load_spot_symbol_universe()
@@ -1113,7 +1119,7 @@ def main() -> None:
         )
         cap_ceil = min(SCAN_PAIR_CAP_MAX, n_syms)
         top_max = cap_ceil
-        top_default = min(200, cap_ceil)
+        top_default = min(scanner_default_top_n(), cap_ceil)
         top_step = 50 if cap_ceil >= 50 else 1
 
         top_n = cap_ceil

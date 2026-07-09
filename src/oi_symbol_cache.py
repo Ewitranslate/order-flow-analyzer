@@ -18,6 +18,13 @@ from futures_market import (
     fetch_futures_24hr_quote_volume,
     fetch_usdt_perpetual_symbols,
 )
+from runtime_profile import (
+    low_memory_mode,
+    oi_max_illiquid_verify,
+    oi_max_workers,
+    oi_skip_cold_rebuild,
+    oi_top_symbols_cap,
+)
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 _DEFAULT_TTL_SEC = 6 * 3600
@@ -170,9 +177,9 @@ def _verify_oi_parallel(symbols: list[str], period: str, *, max_workers: int) ->
 def build_oi_symbol_list(
     period: str,
     *,
-    max_workers: int = 14,
+    max_workers: int | None = None,
     min_quote_vol: float = _MIN_QUOTE_VOL_USDT,
-    max_illiquid_verify: int = _MAX_ILLIQUID_OI_VERIFY,
+    max_illiquid_verify: int | None = None,
 ) -> list[str]:
     """
     Быстрая сборка списка пар с OI:
@@ -181,6 +188,21 @@ def build_oi_symbol_list(
     3) ликвидные (quoteVolume >= порога) — в список без openInterestHist;
     4) низколиквидные — точечная проверка openInterestHist (не более max_illiquid_verify).
     """
+    workers = oi_max_workers() if max_workers is None else max_workers
+    illiquid_cap = oi_max_illiquid_verify() if max_illiquid_verify is None else max_illiquid_verify
+    top_cap = oi_top_symbols_cap()
+
+    if top_cap > 0:
+        try:
+            all_perp = fetch_usdt_perpetual_symbols()
+            vols = fetch_futures_24hr_quote_volume()
+        except _NETWORK_ERRORS:
+            return list(_FALLBACK_OI_SYMBOLS)
+        if len(all_perp) < 2:
+            return all_perp or list(_FALLBACK_OI_SYMBOLS)
+        ranked = sorted(all_perp, key=lambda s: float(vols.get(s, 0.0)), reverse=True)
+        return ranked[:top_cap]
+
     all_perp: list[str]
     try:
         all_perp = fetch_usdt_perpetual_symbols()
@@ -203,8 +225,8 @@ def build_oi_symbol_list(
 
     out: set[str] = set(liquid)
     if illiquid:
-        check = illiquid[: max(0, int(max_illiquid_verify))]
-        out.update(_verify_oi_parallel(check, period, max_workers=max_workers))
+        check = illiquid[: max(0, int(illiquid_cap))]
+        out.update(_verify_oi_parallel(check, period, max_workers=workers))
 
     if len(out) < 2:
         out.update(all_perp[: min(30, len(all_perp))])
@@ -217,7 +239,7 @@ def list_symbols_with_open_interest_fast(
     *,
     rebuild: bool = False,
     ttl_sec: float = _DEFAULT_TTL_SEC,
-    max_workers: int = 14,
+    max_workers: int | None = None,
 ) -> tuple[list[str], str]:
     """
     Возвращает (symbols, source_label).
@@ -228,6 +250,9 @@ def list_symbols_with_open_interest_fast(
         if cached:
             age_h = (oi_cache_age_sec(period) or 0) / 3600.0
             return cached, f"файл ({age_h:.1f} ч)"
+        if oi_skip_cold_rebuild():
+            syms = list(_FALLBACK_OI_SYMBOLS)
+            return syms, "запасной (без тяжёлой пересборки на Render)"
 
     try:
         syms = build_oi_symbol_list(period, max_workers=max_workers)

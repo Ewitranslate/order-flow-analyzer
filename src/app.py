@@ -48,6 +48,7 @@ from binance_http import (
     last_binance_error,
 )
 from futures_market import fetch_futures_klines
+from runtime_profile import cache_max_entries_light, cache_max_entries_medium, klines_fetch_limit, low_memory_mode
 from atr_indicator import add_atr_panel
 from price_compression import (
     CompressionParams,
@@ -111,7 +112,7 @@ def _norm_sym(s: str) -> str:
 # ── REST klines ───────────────────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False, max_entries=cache_max_entries_medium())
 def cached_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     try:
         return fetch_spot_klines(symbol, interval, limit)
@@ -144,7 +145,7 @@ def fetch_spot_usdt_symbol_list() -> list[str]:
     return sorted(set(out))
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=cache_max_entries_light())
 def cached_spot_usdt_symbol_list(reload_token: int = 0) -> list[str]:
     """
     USDT spot TRADING. `reload_token` — сброс кэша (кнопка «Обновить список пар»).
@@ -157,14 +158,14 @@ def cached_spot_usdt_symbol_list(reload_token: int = 0) -> list[str]:
         return list(_FALLBACK_PAIRS_USDT)
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Список пар с OI…")
+@st.cache_data(ttl=6 * 3600, show_spinner="Список пар с OI…", max_entries=cache_max_entries_light())
 def cached_usdtm_symbols_with_oi(period: str, rebuild_token: int = 0) -> tuple[str, ...]:
     """USDT-M perpetual с OI: файл на диске + быстрая пересборка (топ по объёму)."""
     from oi_symbol_cache import _FALLBACK_OI_SYMBOLS, list_symbols_with_open_interest_fast, load_oi_symbol_cache_stale
 
     try:
         syms, _src = list_symbols_with_open_interest_fast(
-            period, rebuild=bool(rebuild_token), max_workers=14
+            period, rebuild=bool(rebuild_token), max_workers=None
         )
         if len(syms) >= 2:
             return tuple(syms)
@@ -176,7 +177,7 @@ def cached_usdtm_symbols_with_oi(period: str, rebuild_token: int = 0) -> tuple[s
     return tuple(_FALLBACK_OI_SYMBOLS)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False, max_entries=cache_max_entries_medium())
 def cached_futures_klines(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     try:
         return fetch_futures_klines(symbol, interval, limit)
@@ -194,7 +195,7 @@ def klines_with_proxy_delta(klines: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_klines_frame(sym: str, tf_key: str, *, limit: int = 500) -> tuple[pd.DataFrame, str]:
+def load_klines_frame(sym: str, tf_key: str, *, limit: int | None = None) -> tuple[pd.DataFrame, str]:
     """
     Сначала Spot `api/v3/klines`; если пары нет или пусто — USDT-M `fapi/v1/klines`
     (некоторые perpetual-only тикеры, например EDGEUSDT, на spot не торгуются).
@@ -202,7 +203,7 @@ def load_klines_frame(sym: str, tf_key: str, *, limit: int = 500) -> tuple[pd.Da
     api_iv = KLINES_API.get(tf_key)
     if not api_iv:
         return pd.DataFrame(), "—"
-    lim = max(20, min(1000, int(limit)))
+    lim = max(20, min(1000, int(klines_fetch_limit() if limit is None else limit)))
     sym_u = sym.upper()
     klines = pd.DataFrame()
     try:
@@ -268,7 +269,7 @@ def fetch_futures_open_interest_hist(symbol: str, period: str, limit: int = 500)
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=90, show_spinner=False, max_entries=cache_max_entries_medium())
 def cached_futures_open_interest_hist(symbol: str, period: str, limit: int) -> pd.DataFrame:
     try:
         df = fetch_futures_open_interest_hist(symbol, period, limit)

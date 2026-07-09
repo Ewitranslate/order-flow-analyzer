@@ -19,6 +19,8 @@ services:
         value: data/auth.sqlite3
       - key: AUTH_SECRET_KEY
         generateValue: true
+      - key: LOW_MEMORY_MODE
+        value: "true"
       - key: AUTH_BOOTSTRAP_USER
         value: ewitranslate
       - key: AUTH_BOOTSTRAP_PASSWORD

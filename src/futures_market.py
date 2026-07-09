@@ -80,6 +80,6 @@ def list_symbols_with_open_interest(
     from oi_symbol_cache import list_symbols_with_open_interest_fast
 
     syms, _ = list_symbols_with_open_interest_fast(
-        period, rebuild=rebuild, max_workers=max(8, int(max_workers))
+        period, rebuild=rebuild, max_workers=None
     )
     return syms

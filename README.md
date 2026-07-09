@@ -89,6 +89,16 @@ data/                    — users.json, кэш (не коммитится)
    - в Environment задать `AUTH_BOOTSTRAP_USER=admin` и `AUTH_BOOTSTRAP_PASSWORD=ваш_пароль_8+` → redeploy
 7. **Manual Deploy** → Clear build cache & deploy
 
+### Память (free tier ~512 MB)
+
+На Render включён **`LOW_MEMORY_MODE=true`** (автоматически и при `RENDER=true`):
+
+- список OI не пересобирается при холодном старте (только по кнопке «Обновить список OI»);
+- меньше параллельных запросов к Binance;
+- урезан кэш Streamlit и лимит свечей (300 вместо 500).
+
+Если снова приходит **memory limit exceeded** — уменьшите лимит пар в Cripto Scanner или перейдите на платный инстанс Render.
+
 В логах после старта ищите: `Auth storage: users=... count=1` и `Bootstrap: создан администратор`.
 
 > Если пишет «Пользователь не найден» — аккаунтов нет (диск пустой или сброшен).  
